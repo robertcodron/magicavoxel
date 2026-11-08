@@ -4,6 +4,7 @@ pub mod history;
 pub mod material;
 pub mod palette;
 pub mod project;
+pub mod scene;
 pub mod selection;
 pub mod voxel;
 
@@ -13,6 +14,7 @@ pub use history::History;
 pub use material::{Material, MaterialType};
 pub use palette::{Palette, Rgba};
 pub use project::EditorProject;
+pub use scene::{NodeId, NodeKind, Rotation, Scene, SceneError, SceneLayer, SceneNode, Transform};
 pub use selection::{SelectionMask, VoxelClipboard};
 pub use voxel::{Axis, AxisFlags, VoxelGrid, MAX_GRID_DIM};
 
@@ -94,5 +96,60 @@ mod tests {
         assert_eq!(proj.grid.get(1, 8, 0), 12);
         assert_eq!(proj.grid.get(8, 8, 0), 12);
     }
-}
 
+    #[test]
+    fn test_grid_revision_tracks_mutations() {
+        let mut grid = VoxelGrid::new(8, 8, 8);
+        let r0 = grid.revision();
+        assert_eq!(grid.clone().revision(), r0, "clone keeps identical content id");
+
+        grid.set(1, 1, 1, 3);
+        let r1 = grid.revision();
+        assert_ne!(r1, r0);
+
+        grid.rot90(Axis::Z);
+        assert_ne!(grid.revision(), r1);
+
+        // A freshly constructed grid never reuses an existing revision.
+        assert_ne!(VoxelGrid::new(8, 8, 8).revision(), grid.revision());
+        // Equality ignores the revision.
+        assert_eq!(VoxelGrid::new(4, 4, 4), VoxelGrid::new(4, 4, 4));
+    }
+
+    #[test]
+    fn test_undo_restores_materials() {
+        let mut proj = EditorProject::new_empty(8, 8, 8);
+        let original = proj.materials[10];
+
+        proj.record_undo();
+        proj.materials[10].kind = MaterialType::Metal;
+        proj.materials[10].rough = 0.42;
+        let edited = proj.materials[10];
+
+        assert!(proj.undo());
+        assert_eq!(proj.materials[10], original);
+        assert!(proj.redo());
+        assert_eq!(proj.materials[10], edited);
+    }
+
+    #[test]
+    fn test_switching_active_model_keeps_edits() {
+        let mut proj = EditorProject::new_empty(4, 4, 4);
+        let other = proj.scene.add_model(VoxelGrid::new(2, 2, 2));
+        let root = proj.scene.root();
+        proj.scene
+            .add_shape(root, other, scene::Transform::IDENTITY)
+            .unwrap();
+
+        proj.grid.set(1, 1, 1, 9);
+        assert!(proj.set_active_model(other));
+        assert_eq!(proj.grid.dimensions().to_array(), [2, 2, 2]);
+        assert_eq!(proj.model(0).unwrap().get(1, 1, 1), 9, "edit committed to scene");
+
+        proj.grid.set(0, 0, 0, 3);
+        assert_eq!(proj.model(other).unwrap().get(0, 0, 0), 3, "live view of active model");
+        assert!(proj.set_active_model(0));
+        assert_eq!(proj.grid.get(1, 1, 1), 9);
+        assert!(!proj.set_active_model(42));
+    }
+}

@@ -3,8 +3,10 @@ use std::fs::File;
 use std::io::{BufWriter, Read, Write};
 use std::path::Path;
 
-use mv_core::{EditorProject, MaterialType, Palette, Rgba, VoxelGrid};
+use mv_core::{EditorProject, Material, MaterialType, Palette, Rgba};
 use thiserror::Error;
+
+mod scene_io;
 
 #[derive(Debug, Error)]
 pub enum FormatError {
@@ -18,35 +20,10 @@ pub enum FormatError {
 
 /// Serialize an `EditorProject` into binary MagicaVoxel `.vox` format (version 150)
 pub fn to_vox_bytes(project: &EditorProject) -> Vec<u8> {
-    let grid = &project.grid;
-    let mut xyzi_entries: Vec<[u8; 4]> = Vec::new();
-    for z in 0..grid.size_z() {
-        for y in 0..grid.size_y() {
-            for x in 0..grid.size_x() {
-                let c = grid.get(x, y, z);
-                if c != 0 {
-                    xyzi_entries.push([x as u8, y as u8, z as u8, c]);
-                }
-            }
-        }
-    }
-
     let mut children = Vec::new();
 
-    // 1. SIZE chunk (12 bytes)
-    let mut size_content = Vec::with_capacity(12);
-    size_content.extend_from_slice(&(grid.size_x() as u32).to_le_bytes());
-    size_content.extend_from_slice(&(grid.size_y() as u32).to_le_bytes());
-    size_content.extend_from_slice(&(grid.size_z() as u32).to_le_bytes());
-    write_chunk(&mut children, b"SIZE", &size_content, &[]);
-
-    // 2. XYZI chunk (4 + 4 * N bytes)
-    let mut xyzi_content = Vec::with_capacity(4 + xyzi_entries.len() * 4);
-    xyzi_content.extend_from_slice(&(xyzi_entries.len() as u32).to_le_bytes());
-    for entry in &xyzi_entries {
-        xyzi_content.extend_from_slice(entry);
-    }
-    write_chunk(&mut children, b"XYZI", &xyzi_content, &[]);
+    // 1-2. SIZE + XYZI per model, then the scene graph (nTRN / nGRP / nSHP) and LAYR
+    scene_io::write_models_and_scene(project, &mut children);
 
     // 3. RGBA chunk (256 * 4 bytes; in .vox format, palette[0..254] stores colors 1..255)
     let mut rgba_content = Vec::with_capacity(1024);
@@ -57,28 +34,15 @@ pub fn to_vox_bytes(project: &EditorProject) -> Vec<u8> {
     rgba_content.extend_from_slice(&[0, 0, 0, 0]);
     write_chunk(&mut children, b"RGBA", &rgba_content, &[]);
 
-    // 4. MATL chunks for non-default materials
+    // 4. MATL chunks for materials that differ from the default
     for i in 1..=255usize {
         let mat = &project.materials[i];
-        if mat.kind != MaterialType::Diffuse || (mat.rough - 0.1).abs() > 1e-4 {
-            let mut matl = Vec::new();
-            matl.extend_from_slice(&(i as i32).to_le_bytes());
-            let pairs = [
-                ("_type", mat.kind.as_str().to_string()),
-                ("_weight", format!("{:.4}", mat.weight)),
-                ("_rough", format!("{:.4}", mat.rough)),
-                ("_spec", format!("{:.4}", mat.spec)),
-                ("_ior", format!("{:.4}", mat.ior)),
-                ("_att", format!("{:.4}", mat.att)),
-                ("_flux", format!("{:.4}", mat.flux)),
-                ("_emit", format!("{:.4}", mat.emit)),
-            ];
-            matl.extend_from_slice(&(pairs.len() as i32).to_le_bytes());
-            for (k, v) in &pairs {
-                write_vox_string(&mut matl, k);
-                write_vox_string(&mut matl, v);
-            }
-            write_chunk(&mut children, b"MATL", &matl, &[]);
+        let default = Material {
+            id: mat.id,
+            ..Default::default()
+        };
+        if *mat != default {
+            write_chunk(&mut children, b"MATL", &matl_content(i as i32, mat), &[]);
         }
     }
 
@@ -107,8 +71,7 @@ pub fn from_vox_bytes(bytes: &[u8]) -> Result<EditorProject, FormatError> {
     let end = (cursor + main_children_len).min(bytes.len());
 
     let mut project = EditorProject::new_empty(40, 40, 40);
-    let mut pending_size: Option<(u32, u32, u32)> = None;
-    let mut loaded_first_model = false;
+    let mut scene_reader = scene_io::SceneReader::default();
 
     while cursor + 12 <= end {
         let id = &bytes[cursor..cursor + 4];
@@ -119,29 +82,7 @@ pub fn from_vox_bytes(bytes: &[u8]) -> Result<EditorProject, FormatError> {
         let content = &bytes[content_start..content_end];
 
         match id {
-            b"SIZE" if content.len() >= 12 => {
-                let sx = read_u32_le(content, 0)?.clamp(1, 256);
-                let sy = read_u32_le(content, 4)?.clamp(1, 256);
-                let sz = read_u32_le(content, 8)?.clamp(1, 256);
-                pending_size = Some((sx, sy, sz));
-            }
-            b"XYZI" if content.len() >= 4 && !loaded_first_model => {
-                let (sx, sy, sz) = pending_size.unwrap_or((40, 40, 40));
-                let mut grid = VoxelGrid::new(sx, sy, sz);
-                let num_voxels = read_u32_le(content, 0)? as usize;
-                let max_voxels = (content.len() - 4) / 4;
-                for i in 0..num_voxels.min(max_voxels) {
-                    let base = 4 + i * 4;
-                    let x = content[base] as u32;
-                    let y = content[base + 1] as u32;
-                    let z = content[base + 2] as u32;
-                    let c = content[base + 3];
-                    grid.set(x, y, z, c);
-                }
-                project.grid = grid;
-                project.selection.resize(sx, sy, sz);
-                loaded_first_model = true;
-            }
+            _ if scene_reader.accept(id, content) => {}
             b"RGBA" if content.len() >= 1020 => {
                 let mut pal = Palette::default();
                 for i in 0..255usize {
@@ -156,30 +97,9 @@ pub fn from_vox_bytes(bytes: &[u8]) -> Result<EditorProject, FormatError> {
                 project.palette = pal;
             }
             b"MATL" if content.len() >= 8 => {
-                if let Ok((mat_id, dict)) = parse_vox_dict(content) {
-                    let idx = (mat_id as usize).clamp(1, 255);
-                    let m = &mut project.materials[idx];
-                    if let Some(t) = dict.get("_type") {
-                        m.kind = MaterialType::from_vox_str(t);
-                    }
-                    if let Some(v) = dict.get("_weight").and_then(|s| s.parse().ok()) {
-                        m.weight = v;
-                    }
-                    if let Some(v) = dict.get("_rough").and_then(|s| s.parse().ok()) {
-                        m.rough = v;
-                    }
-                    if let Some(v) = dict.get("_spec").and_then(|s| s.parse().ok()) {
-                        m.spec = v;
-                    }
-                    if let Some(v) = dict.get("_ior").and_then(|s| s.parse().ok()) {
-                        m.ior = v;
-                    }
-                    if let Some(v) = dict.get("_emit").and_then(|s| s.parse().ok()) {
-                        m.emit = v;
-                    }
-                    if let Some(v) = dict.get("_flux").and_then(|s| s.parse().ok()) {
-                        m.flux = v;
-                    }
+                // Ids map to palette indices; 0 (empty voxel) and out-of-range ids are ignored.
+                if let Ok((mat_id @ 1..=255, dict)) = parse_vox_dict(content) {
+                    apply_matl_dict(&mut project.materials[mat_id as usize], &dict);
                 }
             }
             _ => {}
@@ -187,6 +107,24 @@ pub fn from_vox_bytes(bytes: &[u8]) -> Result<EditorProject, FormatError> {
 
         cursor = content_start + content_len + children_len;
     }
+
+    let scene = scene_reader
+        .finish()
+        .ok_or_else(|| FormatError::InvalidVox("No model (SIZE/XYZI) found".to_string()))?;
+    // Edit the first visible shape's model by default (else the first model).
+    let root = scene.root();
+    let active = scene
+        .shapes_under(root)
+        .into_iter()
+        .find(|&s| scene.is_visible(s))
+        .or_else(|| scene.shapes_under(root).into_iter().next())
+        .and_then(|s| scene.node(s).and_then(|n| n.model_id()))
+        .unwrap_or(0);
+    project.grid = scene.models[active].clone();
+    let d = project.grid.dimensions();
+    project.selection.resize(d.x, d.y, d.z);
+    project.active_model = active;
+    project.scene = scene;
 
     Ok(project)
 }
@@ -425,7 +363,69 @@ pub fn export_slice_png(project: &EditorProject, path: impl AsRef<Path>) -> Resu
     Ok(())
 }
 
-fn write_chunk(out: &mut Vec<u8>, id: &[u8; 4], content: &[u8], children: &[u8]) {
+/// Material property keys written to / read from `MATL` chunks (MagicaVoxel 0.99 naming).
+/// Density is `_d` in the official format; `_density` is also accepted on read.
+/// `_ior` is handled separately: MagicaVoxel stores `ior - 1` (default `0.3` = IOR 1.3).
+fn matl_float_fields(m: &mut Material) -> [(&'static str, &mut f32); 10] {
+    [
+        ("_weight", &mut m.weight),
+        ("_rough", &mut m.rough),
+        ("_spec", &mut m.spec),
+        ("_att", &mut m.att),
+        ("_flux", &mut m.flux),
+        ("_emit", &mut m.emit),
+        ("_ldr", &mut m.ldr),
+        ("_metal", &mut m.metal),
+        ("_alpha", &mut m.alpha),
+        ("_d", &mut m.density),
+    ]
+}
+
+fn matl_content(id: i32, mat: &Material) -> Vec<u8> {
+    let mut m = *mat;
+    // `{}` prints the shortest string that parses back to the exact same f32.
+    let mut pairs: Vec<(&str, String)> = vec![
+        ("_type", mat.kind.as_str().to_string()),
+        ("_ior", format!("{}", mat.ior - 1.0)),
+    ];
+    for (key, value) in matl_float_fields(&mut m) {
+        pairs.push((key, format!("{}", *value)));
+    }
+    // `_trans` mirrors `_alpha` for readers that only know the older key.
+    pairs.push(("_trans", format!("{}", 1.0 - mat.alpha)));
+
+    let mut out = Vec::new();
+    out.extend_from_slice(&id.to_le_bytes());
+    out.extend_from_slice(&(pairs.len() as i32).to_le_bytes());
+    for (k, v) in &pairs {
+        write_vox_string(&mut out, k);
+        write_vox_string(&mut out, v);
+    }
+    out
+}
+
+fn apply_matl_dict(m: &mut Material, dict: &HashMap<String, String>) {
+    if let Some(t) = dict.get("_type") {
+        m.kind = MaterialType::from_vox_str(t);
+    }
+    let parse = |k: &str| dict.get(k).and_then(|s| s.parse::<f32>().ok());
+    if let Some(v) = parse("_ior") {
+        m.ior = v + 1.0;
+    }
+    if let Some(v) = parse("_trans") {
+        m.alpha = 1.0 - v;
+    }
+    for (key, field) in matl_float_fields(m) {
+        if let Some(v) = parse(key) {
+            *field = v;
+        }
+    }
+    if let Some(v) = parse("_density") {
+        m.density = v;
+    }
+}
+
+pub(crate) fn write_chunk(out: &mut Vec<u8>, id: &[u8; 4], content: &[u8], children: &[u8]) {
     out.extend_from_slice(id);
     out.extend_from_slice(&(content.len() as u32).to_le_bytes());
     out.extend_from_slice(&(children.len() as u32).to_le_bytes());
@@ -433,13 +433,13 @@ fn write_chunk(out: &mut Vec<u8>, id: &[u8; 4], content: &[u8], children: &[u8])
     out.extend_from_slice(children);
 }
 
-fn write_vox_string(out: &mut Vec<u8>, s: &str) {
+pub(crate) fn write_vox_string(out: &mut Vec<u8>, s: &str) {
     let b = s.as_bytes();
     out.extend_from_slice(&(b.len() as u32).to_le_bytes());
     out.extend_from_slice(b);
 }
 
-fn read_u32_le(bytes: &[u8], offset: usize) -> Result<u32, FormatError> {
+pub(crate) fn read_u32_le(bytes: &[u8], offset: usize) -> Result<u32, FormatError> {
     if offset + 4 > bytes.len() {
         return Err(FormatError::InvalidVox("Unexpected EOF".to_string()));
     }
@@ -451,7 +451,7 @@ fn read_u32_le(bytes: &[u8], offset: usize) -> Result<u32, FormatError> {
     ]))
 }
 
-fn read_i32_le(bytes: &[u8], offset: usize) -> Result<i32, FormatError> {
+pub(crate) fn read_i32_le(bytes: &[u8], offset: usize) -> Result<i32, FormatError> {
     Ok(read_u32_le(bytes, offset)? as i32)
 }
 
@@ -469,7 +469,7 @@ fn parse_vox_dict(content: &[u8]) -> Result<(i32, HashMap<String, String>), Form
     Ok((id, map))
 }
 
-fn read_vox_string(bytes: &[u8], offset: usize) -> Result<(String, usize), FormatError> {
+pub(crate) fn read_vox_string(bytes: &[u8], offset: usize) -> Result<(String, usize), FormatError> {
     let len = read_u32_le(bytes, offset)? as usize;
     let start = offset + 4;
     let end = start + len;
@@ -501,5 +501,231 @@ mod tests {
         assert_eq!(decoded.materials[42].kind, MaterialType::Metal);
         assert!((decoded.materials[42].rough - 0.25).abs() < 1e-3);
     }
-}
 
+    #[test]
+    fn test_vox_material_roundtrip_all_fields() {
+        let mut proj = EditorProject::new_empty(8, 8, 8);
+        let m = &mut proj.materials[7];
+        m.kind = MaterialType::Glass;
+        m.weight = 0.8;
+        m.rough = 0.05;
+        m.spec = 0.7;
+        m.ior = 1.52;
+        m.att = 0.3;
+        m.flux = 1.5;
+        m.emit = 0.25;
+        m.ldr = 0.4;
+        m.metal = 0.6;
+        m.alpha = 0.35;
+        m.density = 0.9;
+        let expected = *m;
+
+        let decoded = from_vox_bytes(&to_vox_bytes(&proj)).expect("decode");
+        let got = decoded.materials[7];
+        assert_eq!(got.kind, expected.kind);
+        for (a, b) in [
+            (got.weight, expected.weight),
+            (got.rough, expected.rough),
+            (got.spec, expected.spec),
+            (got.ior, expected.ior),
+            (got.att, expected.att),
+            (got.flux, expected.flux),
+            (got.emit, expected.emit),
+            (got.ldr, expected.ldr),
+            (got.metal, expected.metal),
+            (got.alpha, expected.alpha),
+            (got.density, expected.density),
+        ] {
+            assert!((a - b).abs() < 1e-3, "{a} != {b}");
+        }
+        // Untouched materials stay default and produce no MATL chunk.
+        assert_eq!(decoded.materials[8], proj.materials[8]);
+    }
+
+    #[test]
+    fn test_vox_reads_official_matl_keys() {
+        let mut dict = HashMap::new();
+        dict.insert("_type".to_string(), "_glass".to_string());
+        dict.insert("_trans".to_string(), "0.75".to_string());
+        dict.insert("_d".to_string(), "0.5".to_string());
+        dict.insert("_ior".to_string(), "0.3".to_string());
+        let mut m = Material::default();
+        apply_matl_dict(&mut m, &dict);
+        assert_eq!(m.kind, MaterialType::Glass);
+        assert!((m.alpha - 0.25).abs() < 1e-6);
+        assert!((m.density - 0.5).abs() < 1e-6);
+        assert!((m.ior - 1.3).abs() < 1e-6, "_ior is stored as ior - 1");
+    }
+
+    use glam::IVec3;
+    use mv_core::{Axis, NodeKind, Rotation, Transform, VoxelGrid};
+
+    #[test]
+    fn test_vox_multi_model_scene_roundtrip() {
+        let mut proj = EditorProject::new_empty(4, 4, 4);
+        proj.grid.set(0, 0, 0, 5); // live edit of the active model must be saved
+        let mut tree = VoxelGrid::new(3, 3, 8);
+        tree.set(1, 1, 7, 9);
+        let tree_id = proj.scene.add_model(tree);
+
+        let root = proj.scene.root();
+        let group = proj
+            .scene
+            .add_group(root, Transform::from_translation(IVec3::new(20, -4, 0)))
+            .unwrap();
+        let s1 = proj
+            .scene
+            .add_shape(
+                group,
+                tree_id,
+                Transform {
+                    rotation: Rotation::rot90(Axis::Z),
+                    translation: IVec3::new(1, 2, 3),
+                },
+            )
+            .unwrap();
+        let s2 = proj.scene.instantiate(s1).unwrap();
+        proj.scene.translate_world(s2, IVec3::new(10, 0, 0)).unwrap();
+        {
+            let n = proj.scene.node_mut(s2).unwrap();
+            n.name = Some("tree copy".to_string());
+            n.hidden = true;
+            n.layer_id = 3;
+        }
+        proj.scene.layers[3].name = "forest".to_string();
+        proj.scene.layers[3].hidden = true;
+        proj.scene.layers[3].color = [10, 200, 30];
+        // An orphan model (no shape) is not written.
+        proj.scene.add_model(VoxelGrid::new(2, 2, 2));
+
+        let decoded = from_vox_bytes(&to_vox_bytes(&proj)).expect("decode");
+        let sc = &decoded.scene;
+        assert_eq!(sc.models.len(), 2);
+        assert_eq!(decoded.active_model, 0);
+        assert_eq!(decoded.grid.get(0, 0, 0), 5);
+
+        let shapes = sc.shapes_under(sc.root());
+        assert_eq!(shapes.len(), 3);
+        let original_shapes = proj.scene.shapes_under(proj.scene.root());
+        for (&a, &b) in original_shapes.iter().zip(&shapes) {
+            assert_eq!(proj.scene.world_transform(a), sc.world_transform(b));
+            assert_eq!(proj.scene.world_bounds(a), sc.world_bounds(b));
+        }
+        // Instancing survives: both tree shapes reference the same model.
+        assert_eq!(sc.node(shapes[1]).unwrap().model_id(), Some(1));
+        assert_eq!(sc.node(shapes[2]).unwrap().model_id(), Some(1));
+        assert_eq!(sc.models[1].get(1, 1, 7), 9);
+
+        let copy = sc.node(shapes[2]).unwrap();
+        assert_eq!(copy.name.as_deref(), Some("tree copy"));
+        assert!(copy.hidden);
+        assert_eq!(copy.layer_id, 3);
+        assert_eq!(sc.layers[3].name, "forest");
+        assert!(sc.layers[3].hidden);
+        assert_eq!(sc.layers[3].color, [10, 200, 30]);
+        assert!(matches!(
+            sc.node(sc.node(shapes[1]).unwrap().parent.unwrap()).unwrap().kind,
+            NodeKind::Group { .. }
+        ));
+    }
+
+    fn dict(pairs: &[(&str, &str)]) -> Vec<u8> {
+        let mut out = (pairs.len() as i32).to_le_bytes().to_vec();
+        for (k, v) in pairs {
+            write_vox_string(&mut out, k);
+            write_vox_string(&mut out, v);
+        }
+        out
+    }
+
+    fn ints(v: &[i32]) -> Vec<u8> {
+        v.iter().flat_map(|i| i.to_le_bytes()).collect()
+    }
+
+    fn trn(id: i32, attrs: &[(&str, &str)], child: i32, layer: i32, frame: &[(&str, &str)]) -> Vec<u8> {
+        let mut c = ints(&[id]);
+        c.extend(dict(attrs));
+        c.extend(ints(&[child, -1, layer, 1]));
+        c.extend(dict(frame));
+        c
+    }
+
+    /// Hand-built file following the layout MagicaVoxel 0.99 writes, with the chunk order
+    /// shuffled (children before parents) to check the reader resolves ids, not order.
+    #[test]
+    fn test_vox_reads_magicavoxel_scene_layout() {
+        let mut body = Vec::new();
+        for (size, vox) in [([2i32, 2, 2], [0u8, 0, 0, 7]), ([1, 1, 4], [0, 0, 3, 8])] {
+            write_chunk(&mut body, b"SIZE", &ints(&size), &[]);
+            let mut x = ints(&[1]);
+            x.extend_from_slice(&vox);
+            write_chunk(&mut body, b"XYZI", &x, &[]);
+        }
+        let shp = |id: i32, model: i32| {
+            let mut c = ints(&[id]);
+            c.extend(dict(&[]));
+            c.extend(ints(&[1, model]));
+            c.extend(dict(&[]));
+            c
+        };
+        let shp3 = shp(3, 0);
+        let shp5 = shp(5, 1);
+        write_chunk(&mut body, b"nSHP", &shp5, &[]);
+        write_chunk(&mut body, b"nTRN", &trn(4, &[("_name", "pole")], 5, 1, &[("_r", "17"), ("_t", "8 0 2")]), &[]);
+        write_chunk(&mut body, b"nSHP", &shp3, &[]);
+        write_chunk(&mut body, b"nTRN", &trn(2, &[], 3, 0, &[("_t", "0 0 1")]), &[]);
+        let mut grp = ints(&[1]);
+        grp.extend(dict(&[]));
+        grp.extend(ints(&[2, 2, 4]));
+        write_chunk(&mut body, b"nGRP", &grp, &[]);
+        write_chunk(&mut body, b"nTRN", &trn(0, &[], 1, -1, &[]), &[]);
+        let mut layr = ints(&[1]);
+        layr.extend(dict(&[("_name", "props"), ("_hidden", "1")]));
+        layr.extend(ints(&[-1]));
+        write_chunk(&mut body, b"LAYR", &layr, &[]);
+
+        let mut file = b"VOX ".to_vec();
+        file.extend(ints(&[150]));
+        write_chunk(&mut file, b"MAIN", &[], &body);
+
+        let proj = from_vox_bytes(&file).expect("decode");
+        let sc = &proj.scene;
+        let shapes = sc.shapes_under(sc.root());
+        assert_eq!(shapes.len(), 2);
+        assert_eq!(sc.models.len(), 2);
+
+        let cube = sc.node(shapes[0]).unwrap();
+        assert_eq!(cube.model_id(), Some(0));
+        assert_eq!(cube.transform.translation, IVec3::new(0, 0, 1));
+
+        let pole = sc.node(shapes[1]).unwrap();
+        assert_eq!(pole.name.as_deref(), Some("pole"));
+        assert_eq!(pole.layer_id, 1);
+        assert_eq!(pole.transform.rotation, Rotation::from_vox_byte(17));
+        assert_eq!(pole.transform.translation, IVec3::new(8, 0, 2));
+
+        assert_eq!(sc.layers[1].name, "props");
+        assert!(sc.layers[1].hidden);
+        assert!(!sc.is_visible(shapes[1]));
+        assert_eq!(proj.active_model, 0, "first visible shape is edited");
+        assert_eq!(proj.grid.get(0, 0, 0), 7);
+    }
+
+    #[test]
+    fn test_vox_cyclic_graph_does_not_hang() {
+        let mut body = Vec::new();
+        write_chunk(&mut body, b"SIZE", &ints(&[1, 1, 1]), &[]);
+        write_chunk(&mut body, b"XYZI", &ints(&[0]), &[]);
+        write_chunk(&mut body, b"nTRN", &trn(0, &[], 1, -1, &[]), &[]);
+        let mut grp = ints(&[1]);
+        grp.extend(dict(&[]));
+        grp.extend(ints(&[1, 0])); // group lists the root transform as its child
+        write_chunk(&mut body, b"nGRP", &grp, &[]);
+        let mut file = b"VOX ".to_vec();
+        file.extend(ints(&[150]));
+        write_chunk(&mut file, b"MAIN", &[], &body);
+
+        let proj = from_vox_bytes(&file).expect("decode");
+        assert_eq!(proj.scene.node_count(), 1);
+    }
+}

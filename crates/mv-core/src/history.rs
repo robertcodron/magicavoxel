@@ -1,3 +1,4 @@
+use crate::material::Material;
 use crate::palette::Palette;
 use crate::voxel::VoxelGrid;
 
@@ -11,10 +12,11 @@ struct CompressedSnapshot {
     size_z: u32,
     rle_voxels: Vec<(u16, u8)>,
     palette: Palette,
+    materials: Box<[Material; 256]>,
 }
 
 impl CompressedSnapshot {
-    fn capture(grid: &VoxelGrid, palette: &Palette) -> Self {
+    fn capture(grid: &VoxelGrid, palette: &Palette, materials: &[Material; 256]) -> Self {
         let mut rle = Vec::new();
         let raw = grid.raw_data();
         if !raw.is_empty() {
@@ -37,10 +39,11 @@ impl CompressedSnapshot {
             size_z: grid.size_z(),
             rle_voxels: rle,
             palette: palette.clone(),
+            materials: Box::new(*materials),
         }
     }
 
-    fn restore(&self) -> (VoxelGrid, Palette) {
+    fn restore(&self, grid_out: &mut VoxelGrid, palette_out: &mut Palette, materials_out: &mut [Material; 256]) {
         let mut grid = VoxelGrid::new(self.size_x, self.size_y, self.size_z);
         let dst = grid.raw_data_mut();
         let mut pos = 0usize;
@@ -50,7 +53,9 @@ impl CompressedSnapshot {
             dst[pos..end].fill(val);
             pos = end;
         }
-        (grid, self.palette.clone())
+        *grid_out = grid;
+        *palette_out = self.palette.clone();
+        *materials_out = *self.materials;
     }
 }
 
@@ -61,34 +66,48 @@ pub struct History {
 }
 
 impl History {
-    pub fn record(&mut self, grid: &VoxelGrid, palette: &Palette) {
+    pub fn record(&mut self, grid: &VoxelGrid, palette: &Palette, materials: &[Material; 256]) {
         if self.undo_stack.len() >= MAX_UNDO_STEPS {
             self.undo_stack.remove(0);
         }
-        self.undo_stack.push(CompressedSnapshot::capture(grid, palette));
+        self.undo_stack.push(CompressedSnapshot::capture(grid, palette, materials));
         self.redo_stack.clear();
     }
 
-    pub fn undo(&mut self, current_grid: &mut VoxelGrid, current_palette: &mut Palette) -> bool {
+    pub fn undo(
+        &mut self,
+        current_grid: &mut VoxelGrid,
+        current_palette: &mut Palette,
+        current_materials: &mut [Material; 256],
+    ) -> bool {
         if let Some(snapshot) = self.undo_stack.pop() {
             self.redo_stack
-                .push(CompressedSnapshot::capture(current_grid, current_palette));
-            let (g, p) = snapshot.restore();
-            *current_grid = g;
-            *current_palette = p;
+                .push(CompressedSnapshot::capture(
+                current_grid,
+                current_palette,
+                current_materials,
+            ));
+            snapshot.restore(current_grid, current_palette, current_materials);
             true
         } else {
             false
         }
     }
 
-    pub fn redo(&mut self, current_grid: &mut VoxelGrid, current_palette: &mut Palette) -> bool {
+    pub fn redo(
+        &mut self,
+        current_grid: &mut VoxelGrid,
+        current_palette: &mut Palette,
+        current_materials: &mut [Material; 256],
+    ) -> bool {
         if let Some(snapshot) = self.redo_stack.pop() {
             self.undo_stack
-                .push(CompressedSnapshot::capture(current_grid, current_palette));
-            let (g, p) = snapshot.restore();
-            *current_grid = g;
-            *current_palette = p;
+                .push(CompressedSnapshot::capture(
+                current_grid,
+                current_palette,
+                current_materials,
+            ));
+            snapshot.restore(current_grid, current_palette, current_materials);
             true
         } else {
             false

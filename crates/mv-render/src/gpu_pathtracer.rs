@@ -605,21 +605,23 @@ fn build_gpu_materials(project: &EditorProject) -> [GpuMaterial; 256] {
     })
 }
 
+/// Scene change detection. The voxel content is identified by `VoxelGrid::revision()`
+/// (O(1)) instead of hashing up to 16 MB of voxels every frame; palette and materials
+/// are small (256 entries) and hashed directly.
 fn compute_scene_hash(project: &EditorProject) -> u64 {
     let mut hasher = std::collections::hash_map::DefaultHasher::new();
-    project.grid.dimensions().to_array().hash(&mut hasher);
-    project.grid.raw_data().hash(&mut hasher);
+    project.grid.revision().hash(&mut hasher);
     for i in 1..=255 {
         let c = project.palette.colors[i];
         [c.r, c.g, c.b, c.a].hash(&mut hasher);
         let m = project.materials[i];
         (m.kind as u8).hash(&mut hasher);
-        m.rough.to_bits().hash(&mut hasher);
-        m.spec.to_bits().hash(&mut hasher);
-        m.ior.to_bits().hash(&mut hasher);
-        m.emit.to_bits().hash(&mut hasher);
-        m.metal.to_bits().hash(&mut hasher);
-        m.density.to_bits().hash(&mut hasher);
+        for f in [
+            m.weight, m.rough, m.spec, m.ior, m.att, m.flux, m.emit, m.ldr, m.metal, m.alpha,
+            m.density,
+        ] {
+            f.to_bits().hash(&mut hasher);
+        }
     }
     hasher.finish()
 }

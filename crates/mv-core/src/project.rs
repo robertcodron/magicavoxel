@@ -5,13 +5,20 @@ use crate::command::{execute_console_command, CommandOutcome};
 use crate::history::History;
 use crate::material::Material;
 use crate::palette::Palette;
+use crate::scene::Scene;
 use crate::selection::{SelectionMask, VoxelClipboard};
 use crate::voxel::VoxelGrid;
 
 #[derive(Debug, Clone)]
 pub struct EditorProject {
     pub name: String,
+    /// The model being edited (Model Editor). It is "checked out" of `scene.models`:
+    /// `scene.models[active_model]` may be stale while editing, so always read models
+    /// through [`EditorProject::model`] or call [`EditorProject::commit_active_model`].
     pub grid: VoxelGrid,
+    /// World Editor scene graph (all models, nodes, layers).
+    pub scene: Scene,
+    pub active_model: usize,
     pub palette: Palette,
     pub materials: [Material; 256],
     pub selection: SelectionMask,
@@ -45,6 +52,8 @@ impl Default for EditorProject {
 
         Self {
             name: "monu_rust".to_string(),
+            scene: Scene::single(grid.clone()),
+            active_model: 0,
             grid,
             palette: Palette::default(),
             materials,
@@ -68,19 +77,57 @@ impl EditorProject {
         let d = grid.dimensions();
         Self {
             name: "untitled".to_string(),
+            scene: Scene::single(grid.clone()),
+            active_model: 0,
             grid,
             selection: SelectionMask::new(d.x, d.y, d.z),
             ..Default::default()
         }
     }
 
+    /// Up-to-date content of a model (the edited grid for the active model).
+    pub fn model(&self, model_id: usize) -> Option<&VoxelGrid> {
+        if model_id == self.active_model {
+            Some(&self.grid)
+        } else {
+            self.scene.models.get(model_id)
+        }
+    }
+
+    /// Write the edited grid back into `scene.models`.
+    pub fn commit_active_model(&mut self) {
+        if let Some(slot) = self.scene.models.get_mut(self.active_model) {
+            if slot.revision() != self.grid.revision() {
+                *slot = self.grid.clone();
+            }
+        }
+    }
+
+    /// Switch the Model Editor to another model of the scene. The undo history and the
+    /// selection are per-model and therefore reset. Returns `false` for an unknown model.
+    pub fn set_active_model(&mut self, model_id: usize) -> bool {
+        if model_id >= self.scene.models.len() {
+            return false;
+        }
+        if model_id == self.active_model {
+            return true;
+        }
+        self.commit_active_model();
+        self.active_model = model_id;
+        self.grid = self.scene.models[model_id].clone();
+        let d = self.grid.dimensions();
+        self.selection = SelectionMask::new(d.x, d.y, d.z);
+        self.history = History::default();
+        true
+    }
+
     pub fn record_undo(&mut self) {
-        self.history.record(&self.grid, &self.palette);
+        self.history.record(&self.grid, &self.palette, &self.materials);
         self.dirty = true;
     }
 
     pub fn undo(&mut self) -> bool {
-        let ok = self.history.undo(&mut self.grid, &mut self.palette);
+        let ok = self.history.undo(&mut self.grid, &mut self.palette, &mut self.materials);
         if ok {
             let d = self.grid.dimensions();
             self.selection.resize(d.x, d.y, d.z);
@@ -89,7 +136,7 @@ impl EditorProject {
     }
 
     pub fn redo(&mut self) -> bool {
-        let ok = self.history.redo(&mut self.grid, &mut self.palette);
+        let ok = self.history.redo(&mut self.grid, &mut self.palette, &mut self.materials);
         if ok {
             let d = self.grid.dimensions();
             self.selection.resize(d.x, d.y, d.z);

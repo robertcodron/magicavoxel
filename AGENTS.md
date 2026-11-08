@@ -64,15 +64,23 @@ Aucune dépendance graphique ni I/O disque : 100 % pur Rust et math (`glam`).
   - `BrushAction` (`Attach`, `Erase`, `Paint`, `Select`), `BrushMode` (`Voxel`, `Face`, `Box`, `Line`, `Center`, `Pattern`), `VoxelSubShape` (`Cube`, `Sphere`).
   - `BrushSettings::compute_shape_voxels` calcule les voxels de base, `expand_symmetries` applique `Mirror (X/Y/Z)` et `Axis (X/Y/Z)`, et `apply` modifie la `VoxelGrid` et la `SelectionMask`.
 - [`src/history.rs`](file:///Users/robbie/Code/magicavoxel/crates/mv-core/src/history.rs) :
-  - Pile Undo/Redo de 100 niveaux utilisant un encodage RLE (`CompressedSnapshot`) sur la grille de voxels.
+  - Pile Undo/Redo de 100 niveaux utilisant un encodage RLE (`CompressedSnapshot`) sur la grille de voxels ; chaque snapshot inclut aussi la palette et les 256 matériaux.
+  - Côté UI, une modification de swatch/matériau (drag de slider, clic, color picker) produit **une seule** entrée d'undo (`swatch_edit_in_progress`).
 - [`src/command.rs`](file:///Users/robbie/Code/magicavoxel/crates/mv-core/src/command.rs) :
   - Parser et exécuteur de toutes les commandes console de `docs/mv_commands.html` + Voxel Shaders intégrés (`xs wave`, `xs sphere`, `xs torus`, `xs cylinder`, `xs gyroid`, `xs pyramid`, `xs checker`, `xs life`).
+- [`src/scene.rs`](file:///Users/robbie/Code/magicavoxel/crates/mv-core/src/scene.rs) :
+  - Graphe de scène du World Editor : `Scene { models, layers, nodes }`, `SceneNode` (un `nTRN` + enfant groupe/shape), `Transform`, `Rotation` (octet `_r` du `.vox`).
+  - Placement monde d'un voxel `v` : `rotation * (v - size/2) + translation` (division entière), composé avec les transforms des groupes parents.
+  - Opérations World Editor : instances / duplicats (`Ctrl+T`), `move_to_ground` (`G`), `rotate90`, `union` (`U`), `compact_models`.
 - [`src/project.rs`](file:///Users/robbie/Code/magicavoxel/crates/mv-core/src/project.rs) :
-  - `EditorProject` : agrège `VoxelGrid`, `Palette`, `[Material; 256]`, `SelectionMask`, `VoxelClipboard`, `BrushSettings`, `History` et l'historique de la console.
+  - `EditorProject.grid` est le modèle **en cours d'édition**, extrait de `scene.models[active_model]` (qui peut être périmé pendant l'édition) : lire les modèles via `project.model(id)`, ou appeler `commit_active_model()` avant de manipuler `scene.models`. `set_active_model` réinitialise l'undo et la sélection (par modèle).
+  - `EditorProject` : agrège `VoxelGrid`, `Scene`, `Palette`, `[Material; 256]`, `SelectionMask`, `VoxelClipboard`, `BrushSettings`, `History` et l'historique de la console.
 
 ### 3.2 `crates/mv-format` (Sérialisation `.vox` & Exports 3D/2D)
 - [`src/lib.rs`](file:///Users/robbie/Code/magicavoxel/crates/mv-format/src/lib.rs) :
-  - `to_vox_bytes` / `from_vox_bytes` / `save_vox_file` / `load_vox_file` : lecture/écriture binaire du format `.vox` (v150) avec chunks `MAIN`, `SIZE`, `XYZI`, `RGBA`, `MATL`.
+  - `to_vox_bytes` / `from_vox_bytes` / `save_vox_file` / `load_vox_file` : lecture/écriture binaire du format `.vox` (v150) avec chunks `MAIN`, `SIZE`, `XYZI`, `RGBA`, `MATL`, et scène multi-modèles (`nTRN`, `nGRP`, `nSHP`, `LAYR`) dans [`src/scene_io.rs`](file:///Users/robbie/Code/magicavoxel/crates/mv-format/src/scene_io.rs).
+  - Outil de diagnostic : `cargo run -p mv-format --example vox_info -- fichier.vox` affiche le graphe de scène et vérifie le roundtrip.
+  - `MATL` : flottants écrits en représentation exacte (`{}`), `_ior` stocké en **`ior - 1`** (convention MagicaVoxel), ids `1..=255` seulement. Tous les champs de `Material` sont lus/écrits (`_weight`, `_rough`, `_spec`, `_ior`, `_att`, `_flux`, `_emit`, `_ldr`, `_metal`, `_alpha`/`_trans`, `_d` pour la densité). Seuls les matériaux différents du défaut sont écrits.
   - **Subtilité du format `.vox` pour `RGBA` :** Dans la spécification `.vox` d'Ephtracy, l'entrée `0` du chunk `RGBA` stocke la couleur d'index `1` de la palette (et ainsi de suite de `0..254` -> `1..255`). Ce décalage est déjà géré dans `mv-format`.
   - `export_obj_greedy` : export Wavefront `.obj` avec **Greedy Meshing 2D par tranche** (fusionne les faces adjacentes coplanaires de même couleur en quads optimisés).
   - `export_ply_point_cloud` : export `.ply` des voxels de surface visibles.
@@ -86,11 +94,18 @@ Aucune dépendance graphique ni I/O disque : 100 % pur Rust et math (`glam`).
 - [`src/gpu_pathtracer.rs`](file:///Users/robbie/Code/magicavoxel/crates/mv-render/src/gpu_pathtracer.rs) & [`src/pathtrace.wgsl`](file:///Users/robbie/Code/magicavoxel/crates/mv-render/src/pathtrace.wgsl) :
   - `PathTracerEngine` : pipeline Compute `wgpu` exécutant `pathtrace.wgsl` par workgroups de `8x8`.
   - **Détail d'implémentation WGSL :** WGSL ne supportant pas le type `u8` dans les storage buffers, les voxels de la `VoxelGrid` sont packés par 4 octets dans chaque `u32` (`voxels_packed: array<u32>`) et dépackés dans `get_voxel(x, y, z)` via décalage de bits.
-  - Tout changement de caméra, de paramètres de rendu (`PathTracerSettings`), de voxels ou de matériaux est détecté par hachage (`compute_scene_hash` / `compute_camera_and_settings_hash`) et remet automatiquement `current_samples` à `0`.
+  - `VoxelGrid::revision()` : identifiant unique global du contenu, renouvelé par **chaque** méthode `&mut self` (et par toute nouvelle grille). Tout nouveau mutateur de `VoxelGrid` doit le renouveler (`self.revision = next_grid_revision()`).
+  - Tout changement de caméra, de paramètres de rendu (`PathTracerSettings`), de voxels (via `revision()`, sans hacher la grille) ou de matériaux est détecté par hachage (`compute_scene_hash` / `compute_camera_and_settings_hash`) et remet automatiquement `current_samples` à `0`.
   - Inclut un fallback CPU automatique si aucun adaptateur GPU n'est disponible (ex: CI headless).
 
 ### 3.4 `crates/mv-app` (Application Desktop `eframe` / `egui`)
-- [`src/main.rs`](file:///Users/robbie/Code/magicavoxel/crates/mv-app/src/main.rs) :
+- Organisation des modules (`src/`) :
+  - `main.rs` : point d'entrée `eframe` uniquement.
+  - `app.rs` : `MagicaVoxelApp` (état), `ViewportMode`, ouverture/sauvegarde/export, et `update()` qui appelle les panneaux dans l'ordre.
+  - `shortcuts.rs` : `handle_global_shortcuts`.
+  - `ui/top_bar.rs`, `ui/console.rs`, `ui/left_panel.rs` (palette, matériaux, brush), `ui/right_panel.rs` : un panneau egui par fichier.
+  - `viewport.rs` : viewport central (picking, sculpture, rendu DDA ou path tracer).
+- Fonctionnement :
   - Deux modes de vue commutables dans la barre supérieure :
     - `ViewportMode::ModelEditor` : sculpture interactive au clic/glisser (`LButton`), pipette de couleur (`Alt+LButton`), focus caméra (`X+LButton`), panneau Brushes & Transformations.
     - `ViewportMode::PathTracer` : rendu progressif PBR GPU (`wgpu`), clic gauche sur un voxel pour régler la distance de focus **DOF**, `Alt+LButton` pour inspecter le matériau d'un voxel, `Ctrl+C`/`Ctrl+V`/`Ctrl+R` pour copier/coller/réinitialiser un matériau, et bouton **📷 Snap (`F6`)** pour exporter le rendu en PNG.
@@ -102,6 +117,8 @@ Aucune dépendance graphique ni I/O disque : 100 % pur Rust et math (`glam`).
 Lorsque tu reprends le projet, voici les deux chantiers principaux décrits dans [`ROADMAP.md`](file:///Users/robbie/Code/magicavoxel/ROADMAP.md) :
 
 ### Chantier A — Phase 5 : *World Editor* & Graphe de Scène Multi-Objets
+> Les points 1 et 2 sont faits (`scene.rs`, `scene_io.rs`). Reste le point 3 (rendu + UI World Editor).
+
 1. **Créer `crates/mv-core/src/scene.rs`** :
    - Définir `SceneLayer` (8 calques avec `name`, `color`, `hidden`).
    - Définir `SceneObject` (ou un graphe `Node` avec `TransformNode`, `GroupNode`, `ShapeNode`) contenant `id`, `name`, `model_id: usize`, `translation: IVec3`, `rotation`, `layer_id: usize`, `hidden: bool`, `selected: bool`.

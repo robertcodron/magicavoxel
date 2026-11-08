@@ -9,7 +9,7 @@
 | **Phase 3** | *Model Editor* : Brushes (`V`, `F`, `B`, `L`, `C`, `P`), Actions (`T`, `R`, `G`, `N`), Symétries (`Mirror`, `Axis`) & Sélections | ✅ Terminé | 100 % |
 | **Phase 4** | Moteur de Commandes Console (`docs/mv_commands.html`) & Voxel Shaders intégrés (`xs`) | ✅ Terminé | 100 % |
 | **Phase 6** | *Renderer* : Path Tracer GPU (`wgpu` / WGSL), Matériaux PBR (Metal, Glass, Emit, Cloud), DOF & ACES | ✅ Terminé | 90 % |
-| **Phase 5** | *World Editor* : Graphe de scène multi-objets (`nTRN`, `nGRP`, `nSHP`), Instances, Calques (`LAYR`), Gizmos & Booléens | ⏳ À faire | 0 % |
+| **Phase 5** | *World Editor* : Graphe de scène multi-objets (`nTRN`, `nGRP`, `nSHP`), Instances, Calques (`LAYR`), Gizmos & Booléens | 🚧 En cours | 40 % |
 | **Phase 7** | Timeline d'Animation (`0..360`), Shaders GLSL/WGSL externes (`shaders/`), OIDN Denoiser, Marching Cubes & UI avancée | ⏳ À faire | 0 % |
 
 ---
@@ -56,11 +56,17 @@
 
 ### ⏳ Phase 5 : Le *World Editor* (Graphe de Scène Multi-Objets & Calques)
 **Objectif :** Supporter des scènes multi-objets hiérarchiques jusqu'à `2048x2048x1024` comme spécifié dans [`docs/mv_main.html`](file:///Users/robbie/Code/magicavoxel/docs/mv_main.html#L584-L603) et [`docs/mv_controls.html`](file:///Users/robbie/Code/magicavoxel/docs/mv_controls.html#L188-L254).
-- [ ] **Graphe de scène (`crates/mv-core/src/scene.rs`)** :
-  - Nœuds `TransformNode` (`nTRN`), `GroupNode` (`nGRP`), `ShapeNode` (`nSHP` référençant un `ModelId` pour l'instanciation partagée *Reference* vs copie indépendante *Duplicate* via `Ctrl+T`).
-  - Gestionnaire de 8+ calques (`SceneLayer` / chunk `LAYR`) avec visibilité, nom et couleur.
-- [ ] **Sérialisation `.vox` complète (`crates/mv-format`)** :
-  - Supporter plusieurs paires `SIZE` + `XYZI` dans un même fichier `.vox` ainsi que les chunks `nTRN`, `nGRP`, `nSHP`, `LAYR`, `rOBJ`.
+- [x] **Graphe de scène (`crates/mv-core/src/scene.rs`)** :
+  - `SceneNode` = un `nTRN` + son enfant (`NodeKind::Group` / `NodeKind::Shape { model_id }`), `Transform` (`Rotation` permutation signée encodée comme l'octet `_r`, translation `IVec3`).
+  - Instances partagées (*Reference*, `instantiate`) vs copies (*Duplicate*, `duplicate`, `convert_reference_to_duplicate` pour `Ctrl+T`).
+  - 8 calques par défaut (`SceneLayer`), visibilité héritée (nœud, ancêtres, calque).
+  - Opérations : `world_bounds`, `translate_world`, `move_to_ground` (`G`), `rotate90` (`-`/`+`, axe monde), `union` (`U`), `remove_node`, `compact_models`, `merge_to_grid`.
+  - `EditorProject` : `scene` + `active_model` ; `grid` est le modèle en cours d'édition (`set_active_model`, `commit_active_model`, `model()`).
+- [x] **Sérialisation `.vox` multi-modèles (`crates/mv-format/src/scene_io.rs`)** :
+  - Lecture/écriture de toutes les paires `SIZE` + `XYZI`, `nTRN`, `nGRP`, `nSHP`, `LAYR` (résolution par id, ordre des chunks indifférent, protection contre les cycles).
+  - Fichiers pré-0.99 multi-modèles (animations) : frame 0 visible, autres frames en shapes cachées `frame N`.
+  - Validé sur 15 fichiers réels (`ephtracy/voxel-model`, `opengametools`, `dot_vox`) via `cargo run -p mv-format --example vox_info -- <fichiers.vox>`.
+  - Limites actuelles : seule la première frame d'animation des `nTRN`/`nSHP` est conservée ; `rOBJ`, `rCAM`, `NOTE`, `IMAP` sont ignorés.
 - [ ] **Outils & Raccourcis World Editor (`crates/mv-app`)** :
   - Bascule `TAB` entre *Model Editor* et *World Editor* (et `TAB` / `Shift+TAB` pour entrer/sortir d'un groupe).
   - Gizmos 3D de translation et rotation à 90°, alignement au sol (`G`), Union booléenne d'objets (`U`), masquage (`Ctrl+H` / `Ctrl+Shift+H`).

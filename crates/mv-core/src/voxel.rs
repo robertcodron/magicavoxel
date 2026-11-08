@@ -1,3 +1,5 @@
+use std::sync::atomic::{AtomicU64, Ordering};
+
 use glam::{IVec3, UVec3, Vec3};
 
 pub const MAX_GRID_DIM: u32 = 256;
@@ -41,13 +43,33 @@ impl AxisFlags {
 /// 3D Voxel grid with MagicaVoxel coordinates:
 /// X = right [0..size_x), Y = depth [0..size_y), Z = up [0..size_z).
 /// Each voxel is a `u8` palette index (`0` = empty, `1..=255` = solid).
-#[derive(Debug, Clone, PartialEq, Eq)]
+static NEXT_GRID_REVISION: AtomicU64 = AtomicU64::new(1);
+
+fn next_grid_revision() -> u64 {
+    NEXT_GRID_REVISION.fetch_add(1, Ordering::Relaxed)
+}
+
+#[derive(Debug, Clone)]
 pub struct VoxelGrid {
     size_x: u32,
     size_y: u32,
     size_z: u32,
     data: Vec<u8>,
+    /// Globally unique id of the current content. Refreshed by every `&mut self`
+    /// method, so two grids with the same revision are guaranteed identical.
+    revision: u64,
 }
+
+impl PartialEq for VoxelGrid {
+    fn eq(&self, other: &Self) -> bool {
+        self.size_x == other.size_x
+            && self.size_y == other.size_y
+            && self.size_z == other.size_z
+            && self.data == other.data
+    }
+}
+
+impl Eq for VoxelGrid {}
 
 impl Default for VoxelGrid {
     fn default() -> Self {
@@ -65,6 +87,7 @@ impl VoxelGrid {
             size_y: sy,
             size_z: sz,
             data: vec![0; (sx * sy * sz) as usize],
+            revision: next_grid_revision(),
         }
     }
 
@@ -89,12 +112,18 @@ impl VoxelGrid {
     }
 
     #[inline]
+    /// Content revision id (see field doc). Cheap change detection for renderers.
+    pub fn revision(&self) -> u64 {
+        self.revision
+    }
+
     pub fn raw_data(&self) -> &[u8] {
         &self.data
     }
 
     #[inline]
     pub fn raw_data_mut(&mut self) -> &mut [u8] {
+        self.revision = next_grid_revision();
         &mut self.data
     }
 
@@ -133,6 +162,7 @@ impl VoxelGrid {
 
     #[inline]
     pub fn set(&mut self, x: u32, y: u32, z: u32, color: u8) {
+        self.revision = next_grid_revision();
         if let Some(i) = self.index(x, y, z) {
             self.data[i] = color;
         }
@@ -140,6 +170,7 @@ impl VoxelGrid {
 
     #[inline]
     pub fn set_i32(&mut self, x: i32, y: i32, z: i32, color: u8) {
+        self.revision = next_grid_revision();
         if self.in_bounds(x, y, z) {
             self.set(x as u32, y as u32, z as u32, color);
         }
@@ -181,16 +212,19 @@ impl VoxelGrid {
 
     /// `zero`: clear all voxels
     pub fn clear(&mut self) {
+        self.revision = next_grid_revision();
         self.data.fill(0);
     }
 
     /// `full`: fill entire volume with `color`
     pub fn full(&mut self, color: u8) {
+        self.revision = next_grid_revision();
         self.data.fill(color);
     }
 
     /// `fill`: paint all existing solid voxels with `color`
     pub fn fill_solid(&mut self, color: u8) {
+        self.revision = next_grid_revision();
         for v in &mut self.data {
             if *v != 0 {
                 *v = color;
@@ -200,6 +234,7 @@ impl VoxelGrid {
 
     /// `inv`: invert solid and empty space using `color` for newly created voxels
     pub fn invert(&mut self, color: u8) {
+        self.revision = next_grid_revision();
         let fill_color = if color == 0 { 1 } else { color };
         for v in &mut self.data {
             *v = if *v == 0 { fill_color } else { 0 };
@@ -208,6 +243,7 @@ impl VoxelGrid {
 
     /// `size [x y z]`: resize volume while preserving existing voxels anchored at (0,0,0)
     pub fn resize(&mut self, new_x: u32, new_y: u32, new_z: u32) {
+        self.revision = next_grid_revision();
         let nx = new_x.clamp(1, MAX_GRID_DIM);
         let ny = new_y.clamp(1, MAX_GRID_DIM);
         let nz = new_z.clamp(1, MAX_GRID_DIM);
@@ -227,6 +263,7 @@ impl VoxelGrid {
 
     /// `shrink`: fit model size tightly around solid voxels
     pub fn shrink(&mut self) -> bool {
+        self.revision = next_grid_revision();
         let mut min_b = UVec3::new(self.size_x, self.size_y, self.size_z);
         let mut max_b = UVec3::ZERO;
         let mut found = false;
@@ -264,6 +301,7 @@ impl VoxelGrid {
 
     /// `flip [axis]`: flip model along specified axes
     pub fn flip(&mut self, axes: AxisFlags) {
+        self.revision = next_grid_revision();
         let prev = self.clone();
         for z in 0..self.size_z {
             for y in 0..self.size_y {
@@ -279,6 +317,7 @@ impl VoxelGrid {
 
     /// `loop [axis] [offset]`: toroidal wrap-around shift
     pub fn loop_shift(&mut self, delta: IVec3) {
+        self.revision = next_grid_revision();
         let prev = self.clone();
         let sx = self.size_x as i32;
         let sy = self.size_y as i32;
@@ -297,6 +336,7 @@ impl VoxelGrid {
 
     /// `scale [xyz] [factor]` & `x2`: scale volume dimensions and nearest-neighbor sample voxels
     pub fn scale(&mut self, factors: Vec3) {
+        self.revision = next_grid_revision();
         let fx = factors.x.max(0.05);
         let fy = factors.y.max(0.05);
         let fz = factors.z.max(0.05);
@@ -326,6 +366,7 @@ impl VoxelGrid {
 
     /// `rot90 [axis]`: rotate volume 90 degrees counter-clockwise around X, Y, or Z
     pub fn rot90(&mut self, axis: Axis) {
+        self.revision = next_grid_revision();
         let prev = self.clone();
         match axis {
             Axis::Z => {
@@ -366,6 +407,7 @@ impl VoxelGrid {
 
     /// `rot [axis] [degree]`: rotate model around volume center by arbitrary angle in degrees
     pub fn rotate_degrees(&mut self, axis: Axis, degrees: f32) {
+        self.revision = next_grid_revision();
         let rem = degrees.rem_euclid(360.0);
         if (rem - 90.0).abs() < 1e-3 {
             self.rot90(axis);
@@ -424,6 +466,7 @@ impl VoxelGrid {
 
     /// `repeat [xyz] [factor]`: tile/repeat model (negative value for mirror repeat)
     pub fn repeat(&mut self, factors: Vec3) {
+        self.revision = next_grid_revision();
         let prev = self.clone();
         let rx = factors.x.abs().max(0.1);
         let ry = factors.y.abs().max(0.1);
@@ -461,6 +504,7 @@ impl VoxelGrid {
 
     /// `mir [axis]`: mirror symmetry across specified axes
     pub fn mirror_symmetry(&mut self, axes: AxisFlags) {
+        self.revision = next_grid_revision();
         if axes.x {
             for z in 0..self.size_z {
                 for y in 0..self.size_y {
@@ -501,6 +545,7 @@ impl VoxelGrid {
 
     /// `dia [axis]`: diagonal symmetry across the plane perpendicular to axis
     pub fn diagonal_symmetry(&mut self, axes: AxisFlags) {
+        self.revision = next_grid_revision();
         if axes.z {
             let limit = self.size_x.min(self.size_y);
             for z in 0..self.size_z {
@@ -594,6 +639,7 @@ impl VoxelGrid {
 
     /// `dil [axis]`: morphological dilation along specified directions
     pub fn dilate(&mut self, spec: &str) {
+        self.revision = next_grid_revision();
         let dirs = Self::parse_direction_offsets(spec);
         let prev = self.clone();
         let sx = self.size_x as i32;
@@ -618,6 +664,7 @@ impl VoxelGrid {
 
     /// `ero [axis]`: morphological erosion along specified directions
     pub fn erode(&mut self, spec: &str) {
+        self.revision = next_grid_revision();
         let dirs = Self::parse_direction_offsets(spec);
         let prev = self.clone();
         let sx = self.size_x as i32;
@@ -643,6 +690,7 @@ impl VoxelGrid {
     /// - if `color_index == 0`, hollow out the volume by removing all interior invisible voxels
     /// - otherwise, fill all interior invisible cavities with `color_index`
     pub fn flood(&mut self, color_index: u8) {
+        self.revision = next_grid_revision();
         if color_index == 0 {
             let prev = self.clone();
             for z in 1..self.size_z.saturating_sub(1) {
@@ -709,6 +757,7 @@ impl VoxelGrid {
 
     /// `noise [seed scale min max]`: 3D value noise volume generation
     pub fn generate_noise(&mut self, seed: u32, scale: f32, min_val: f32, max_val: f32, base_color: u8) {
+        self.revision = next_grid_revision();
         let c = if base_color == 0 { 1 } else { base_color };
         let scale = scale.max(0.001);
         for z in 0..self.size_z {
@@ -733,6 +782,7 @@ impl VoxelGrid {
 
     /// `rand [min max]`: paint solid voxels with random color index between `min` and `max`
     pub fn rand_paint(&mut self, min_idx: u8, max_idx: u8, seed: u32) {
+        self.revision = next_grid_revision();
         let lo = min_idx.min(max_idx).max(1);
         let hi = min_idx.max(max_idx).max(1);
         let span = (hi - lo) as u32 + 1;
@@ -746,6 +796,7 @@ impl VoxelGrid {
 
     /// `maze [edge_length]`: generate 3D maze / architectural grid structure
     pub fn generate_maze(&mut self, edge: u32, color: u8) {
+        self.revision = next_grid_revision();
         let step = edge.max(2);
         let c = if color == 0 { 1 } else { color };
         self.clear();
@@ -782,6 +833,7 @@ impl VoxelGrid {
 
     /// `shear [axis] [s1] [s2]`: shear model along axis
     pub fn shear(&mut self, axis: Axis, s1: f32, s2: f32) {
+        self.revision = next_grid_revision();
         let prev = self.clone();
         self.clear();
         let cx = self.size_x as f32 * 0.5;
