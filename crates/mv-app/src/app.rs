@@ -7,9 +7,12 @@ use mv_format::{
 };
 use mv_render::{DisplaySettings, OrbitCamera, PathTracerEngine, PathTracerSettings, RayHit};
 
+use crate::world_editor::WorldEditorState;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum ViewportMode {
     ModelEditor,
+    WorldEditor,
     PathTracer,
 }
 
@@ -35,6 +38,13 @@ pub(crate) struct MagicaVoxelApp {
     pub(crate) current_file: Option<PathBuf>,
     /// True while a swatch/material edit gesture is ongoing (one undo step per gesture).
     pub(crate) swatch_edit_in_progress: bool,
+    pub(crate) world: WorldEditorState,
+    /// `TAB` / `Shift+TAB` intercepted in `raw_input_hook` (value = shift held).
+    pub(crate) pending_tab: Option<bool>,
+    /// UI scale change requested from inside an input closure (applied after it).
+    pub(crate) pending_ui_scale: Option<f32>,
+    /// Screen rectangle of the 3D viewport during the last frame.
+    pub(crate) viewport_rect: egui::Rect,
 }
 
 impl MagicaVoxelApp {
@@ -43,8 +53,12 @@ impl MagicaVoxelApp {
         visuals.panel_fill = Color32::from_rgb(30, 32, 36);
         visuals.window_fill = Color32::from_rgb(34, 36, 40);
         cc.egui_ctx.set_visuals(visuals);
+        Self::with_project(EditorProject::default())
+    }
 
-        let project = EditorProject::default();
+    /// Construct the app state without a window (also used by headless tests).
+    pub(crate) fn with_project(project: EditorProject) -> Self {
+        let project_root = project.scene.root();
         let d = project.grid.dimensions();
         let mut camera = OrbitCamera::default();
         camera.recenter(&project.grid);
@@ -74,6 +88,10 @@ impl MagicaVoxelApp {
             ui_scale: 1.0,
             current_file: None,
             swatch_edit_in_progress: false,
+            world: WorldEditorState::new(project_root),
+            pending_tab: None,
+            pending_ui_scale: None,
+            viewport_rect: egui::Rect::NOTHING,
         }
     }
 
@@ -103,7 +121,12 @@ impl MagicaVoxelApp {
             match load_vox_file(&path) {
                 Ok(proj) => {
                     self.project = proj;
-                    self.camera.recenter(&self.project.grid);
+                    self.reset_world_state();
+                    if self.mode == ViewportMode::WorldEditor {
+                        self.frame_world_camera();
+                    } else {
+                        self.camera.recenter(&self.project.grid);
+                    }
                     self.sync_size_input();
                     self.pathtracer.reset_accumulation();
                     self.current_file = Some(path.clone());
@@ -221,13 +244,53 @@ impl MagicaVoxelApp {
 }
 
 impl eframe::App for MagicaVoxelApp {
+    /// Intercept `TAB` before egui uses it for keyboard focus navigation, unless a
+    /// widget (e.g. the console) has focus.
+    fn raw_input_hook(&mut self, ctx: &egui::Context, raw_input: &mut egui::RawInput) {
+        if ctx.memory(|m| m.focused().is_some()) {
+            return;
+        }
+        raw_input.events.retain(|e| match e {
+            egui::Event::Key {
+                key: egui::Key::Tab,
+                pressed,
+                modifiers,
+                ..
+            } => {
+                if *pressed {
+                    self.pending_tab = Some(modifiers.shift);
+                }
+                false
+            }
+            _ => true,
+        });
+    }
+
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        self.frame(ctx);
+    }
+}
+
+impl MagicaVoxelApp {
+    /// One UI frame (separate from `eframe::App::update` so tests can drive it).
+    pub(crate) fn frame(&mut self, ctx: &egui::Context) {
+        if let Some(shift) = self.pending_tab.take() {
+            self.handle_tab(shift);
+        }
+        let world_before =
+            (self.mode == ViewportMode::WorldEditor).then(|| self.project.scene.structure());
+
         self.handle_global_shortcuts(ctx);
+        if let Some(scale) = self.pending_ui_scale.take() {
+            ctx.set_pixels_per_point(scale);
+        }
         // Panel order matters in egui: top/bottom/side panels before the central viewport.
         self.show_top_bar(ctx);
         self.show_console_panel(ctx);
         self.show_left_panel(ctx);
         self.show_right_panel(ctx);
         self.show_viewport(ctx);
+
+        self.finish_world_frame(ctx, world_before);
     }
 }

@@ -13,7 +13,7 @@
 
 use std::collections::BTreeMap;
 
-use glam::IVec3;
+use glam::{IVec3, Vec3};
 
 use crate::voxel::{Axis, VoxelGrid, MAX_GRID_DIM};
 
@@ -87,6 +87,20 @@ impl Rotation {
         }
     }
 
+    /// Same signed permutation applied to a float vector (exact, no rounding).
+    pub fn apply_f32(self, v: Vec3) -> Vec3 {
+        let a = v.to_array();
+        let c = |i: usize| {
+            let x = a[self.idx[i] as usize];
+            if self.neg[i] {
+                -x
+            } else {
+                x
+            }
+        };
+        Vec3::new(c(0), c(1), c(2))
+    }
+
     pub fn apply(self, v: IVec3) -> IVec3 {
         let a = v.to_array();
         let c = |i: usize| {
@@ -151,6 +165,14 @@ impl Transform {
 
     pub fn apply(self, p: IVec3) -> IVec3 {
         self.rotation.apply(p) + self.translation
+    }
+
+    pub fn inverse(self) -> Self {
+        let inv = self.rotation.inverse();
+        Self {
+            rotation: inv,
+            translation: -inv.apply(self.translation),
+        }
     }
 }
 
@@ -225,6 +247,15 @@ impl std::fmt::Display for SceneError {
 }
 
 impl std::error::Error for SceneError {}
+
+/// Snapshot of a scene's nodes and layers (see [`Scene::structure`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SceneStructure {
+    layers: Vec<SceneLayer>,
+    nodes: BTreeMap<NodeId, SceneNode>,
+    root: NodeId,
+    next_id: NodeId,
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Scene {
@@ -459,7 +490,8 @@ impl Scene {
     }
 
     /// Local→world placement of model voxel coordinates for a shape.
-    fn shape_voxel_transform(&self, shape: NodeId) -> Result<Transform, SceneError> {
+    /// Maps a shape's model voxel coordinates to world voxel coordinates.
+    pub fn shape_voxel_transform(&self, shape: NodeId) -> Result<Transform, SceneError> {
         let model = self.model_of(shape)?;
         let half = (model.dimensions() / 2).as_ivec3();
         let centering = Transform::from_translation(-half);
@@ -625,6 +657,111 @@ impl Scene {
             }
         }
         Ok(new_id)
+    }
+
+    /// Topmost ancestor of `id` (or `id` itself) whose parent is `group`.
+    /// This is the object a click selects while editing inside `group`.
+    pub fn child_of_group_containing(&self, id: NodeId, group: NodeId) -> Option<NodeId> {
+        let mut cur = id;
+        loop {
+            let parent = self.nodes.get(&cur)?.parent?;
+            if parent == group {
+                return Some(cur);
+            }
+            cur = parent;
+        }
+    }
+
+    /// Whether `ancestor` is `id` or one of its ancestors.
+    pub fn is_ancestor_or_self(&self, ancestor: NodeId, id: NodeId) -> bool {
+        let mut cur = Some(id);
+        while let Some(n) = cur {
+            if n == ancestor {
+                return true;
+            }
+            cur = self.nodes.get(&n).and_then(|node| node.parent);
+        }
+        false
+    }
+
+    /// Move `id` under `new_parent`, keeping its world placement.
+    pub fn set_parent(&mut self, id: NodeId, new_parent: NodeId) -> Result<(), SceneError> {
+        if id == self.root {
+            return Err(SceneError::CannotRemoveRoot);
+        }
+        if !matches!(self.get(new_parent)?.kind, NodeKind::Group { .. })
+            || self.is_ancestor_or_self(id, new_parent)
+        {
+            return Err(SceneError::NotAGroup(new_parent));
+        }
+        let world = self.world_transform(id);
+        let parent_world = self.world_transform(new_parent);
+        let old_parent = self.get(id)?.parent;
+        if let Some(p) = old_parent {
+            if let Some(NodeKind::Group { children }) = self.nodes.get_mut(&p).map(|n| &mut n.kind)
+            {
+                children.retain(|&c| c != id);
+            }
+        }
+        if let NodeKind::Group { children } = &mut self.get_mut(new_parent)?.kind {
+            children.push(id);
+        }
+        let node = self.get_mut(id)?;
+        node.parent = Some(new_parent);
+        node.transform = parent_world.inverse().compose(world);
+        Ok(())
+    }
+
+    /// `Ctrl+R`: put nodes into a new group (created under the parent of the first one).
+    pub fn group_nodes(&mut self, ids: &[NodeId]) -> Result<NodeId, SceneError> {
+        let first = *ids.first().ok_or(SceneError::NothingToMerge)?;
+        let parent = self.get(first)?.parent.unwrap_or(self.root);
+        let group = self.add_group(parent, Transform::IDENTITY)?;
+        for &id in ids {
+            if self.nodes.contains_key(&id) && !self.is_ancestor_or_self(id, group) {
+                self.set_parent(id, group)?;
+            }
+        }
+        Ok(group)
+    }
+
+    /// `Ctrl+Shift+R`: move a group's children to its parent and delete the group.
+    /// Returns the freed children.
+    pub fn ungroup(&mut self, group: NodeId) -> Result<Vec<NodeId>, SceneError> {
+        if group == self.root {
+            return Err(SceneError::CannotRemoveRoot);
+        }
+        let node = self.get(group)?;
+        let NodeKind::Group { children } = &node.kind else {
+            return Err(SceneError::NotAGroup(group));
+        };
+        let children = children.clone();
+        let parent = node.parent.unwrap_or(self.root);
+        for &c in &children {
+            self.set_parent(c, parent)?;
+        }
+        self.remove_node(group)?;
+        Ok(children)
+    }
+
+    /// Everything except the models: used by the World Editor undo, which must never
+    /// roll back voxel edits made in the Model Editor in the meantime.
+    pub fn structure(&self) -> SceneStructure {
+        SceneStructure {
+            layers: self.layers.clone(),
+            nodes: self.nodes.clone(),
+            root: self.root,
+            next_id: self.next_id,
+        }
+    }
+
+    /// Restore a [`SceneStructure`]. Models are kept as they are now (World Editor
+    /// operations only ever append models, so every referenced model still exists).
+    pub fn restore_structure(&mut self, s: SceneStructure) {
+        self.layers = s.layers;
+        self.nodes = s.nodes;
+        self.root = s.root;
+        self.next_id = s.next_id;
     }
 
     /// Drop models no shape references and renumber the rest (keeping their order).
@@ -837,5 +974,70 @@ mod tests {
         assert_eq!(scene.node_count(), 1);
         assert!(scene.node(root).unwrap().children().is_empty());
         assert_eq!(scene.remove_node(root), Err(SceneError::CannotRemoveRoot));
+    }
+
+    #[test]
+    fn group_and_ungroup_keep_world_placement() {
+        let mut scene = Scene::new();
+        let m = scene.add_model(VoxelGrid::new(2, 3, 4));
+        let root = scene.root();
+        let rotated = scene
+            .add_group(
+                root,
+                Transform {
+                    rotation: Rotation::rot90(Axis::Z),
+                    translation: IVec3::new(5, 0, 0),
+                },
+            )
+            .unwrap();
+        let a = scene
+            .add_shape(rotated, m, Transform::from_translation(IVec3::new(1, 2, 3)))
+            .unwrap();
+        let b = scene
+            .add_shape(root, m, Transform::from_translation(IVec3::new(-7, 0, 0)))
+            .unwrap();
+        let before = (scene.world_bounds(a), scene.world_bounds(b));
+
+        let g = scene.group_nodes(&[a, b]).unwrap();
+        assert_eq!(scene.node(a).unwrap().parent, Some(g));
+        assert_eq!(scene.node(b).unwrap().parent, Some(g));
+        assert_eq!((scene.world_bounds(a), scene.world_bounds(b)), before);
+        // The new group lives under the first node's parent.
+        assert_eq!(scene.node(g).unwrap().parent, Some(rotated));
+        assert_eq!(scene.node(rotated).unwrap().children(), &[g]);
+
+        assert_eq!(scene.child_of_group_containing(a, root), Some(rotated));
+        assert_eq!(scene.child_of_group_containing(a, g), Some(a));
+
+        let freed = scene.ungroup(g).unwrap();
+        assert_eq!(freed, vec![a, b]);
+        assert!(scene.node(g).is_none());
+        assert_eq!(scene.node(b).unwrap().parent, Some(rotated));
+        assert_eq!((scene.world_bounds(a), scene.world_bounds(b)), before);
+
+        // A group cannot be moved inside itself.
+        let g2 = scene.group_nodes(&[a]).unwrap();
+        assert!(scene.set_parent(g2, g2).is_err());
+    }
+
+    #[test]
+    fn structure_snapshot_keeps_current_models() {
+        let mut scene = Scene::single(cube(2, 1));
+        let snap = scene.structure();
+        let s = scene.shapes_under(scene.root())[0];
+        let copy = scene.duplicate(s).unwrap();
+        scene.models[0].set(0, 0, 0, 9); // voxel edit after the snapshot
+        scene.restore_structure(snap);
+        assert!(scene.node(copy).is_none());
+        assert_eq!(scene.models[0].get(0, 0, 0), 9, "voxel edits survive");
+    }
+
+    #[test]
+    fn rotation_apply_f32_matches_integer() {
+        for b in 0u8..128 {
+            let r = Rotation::from_vox_byte(b);
+            let v = IVec3::new(3, -5, 7);
+            assert_eq!(r.apply_f32(v.as_vec3()), r.apply(v).as_vec3());
+        }
     }
 }

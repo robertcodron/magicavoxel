@@ -2,6 +2,10 @@ mod app;
 mod shortcuts;
 mod ui;
 mod viewport;
+mod world_editor;
+
+#[cfg(test)]
+mod tests;
 
 use eframe::egui;
 

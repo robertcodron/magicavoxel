@@ -14,17 +14,35 @@ impl MagicaVoxelApp {
                 );
                 ui.separator();
 
-                // Mode Switcher: Model Editor vs GPU Path Tracer Renderer
-                ui.selectable_value(
-                    &mut self.mode,
-                    ViewportMode::ModelEditor,
-                    RichText::new("✏ Model").strong(),
-                );
+                // Mode switcher (TAB toggles Model <-> World, see `handle_tab`)
+                let model_label = format!("✏ Model #{}", self.project.active_model);
+                if ui
+                    .selectable_label(
+                        self.mode == ViewportMode::ModelEditor,
+                        RichText::new(model_label).strong(),
+                    )
+                    .on_hover_text("Model Editor: sculpt the active model (TAB)")
+                    .clicked()
+                    && self.mode != ViewportMode::ModelEditor
+                {
+                    self.enter_model_editor();
+                }
+                if ui
+                    .selectable_label(
+                        self.mode == ViewportMode::WorldEditor,
+                        RichText::new("🌍 World").strong(),
+                    )
+                    .on_hover_text("World Editor: arrange objects, groups and layers (TAB)")
+                    .clicked()
+                {
+                    self.enter_world_editor();
+                }
                 ui.selectable_value(
                     &mut self.mode,
                     ViewportMode::PathTracer,
                     RichText::new("✨ Render (Path Tracer)").strong(),
-                );
+                )
+                .on_hover_text("Renders the active model");
 
                 ui.separator();
                 ui.label("Project:");

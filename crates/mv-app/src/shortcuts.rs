@@ -8,7 +8,8 @@ impl MagicaVoxelApp {
         let text_focused = ctx.memory(|m| m.focused().is_some());
 
         ctx.input(|i| {
-            if i.key_pressed(Key::F1) || (!text_focused && i.key_pressed(Key::Tab)) {
+            // `F1` activates the console (`TAB` switches editors, see `raw_input_hook`).
+            if i.key_pressed(Key::F1) {
                 self.focus_console_next_frame = true;
             }
             if !text_focused && (i.key_pressed(Key::F6) || i.key_pressed(Key::Num6)) {
@@ -24,19 +25,27 @@ impl MagicaVoxelApp {
             let cmd = i.modifiers.command || i.modifiers.ctrl;
             let shift = i.modifiers.shift;
 
-            // Global Undo / Redo / File shortcuts
+            let world = self.mode == ViewportMode::WorldEditor;
+
+            // Global Undo / Redo / File shortcuts (World Editor has its own scene history)
             if cmd && !shift && i.key_pressed(Key::Z) {
-                if self.project.undo() {
+                if world {
+                    self.world_undo_redo(false);
+                } else if self.project.undo() {
                     self.sync_size_input();
                 }
             } else if (cmd && shift && i.key_pressed(Key::Z)) || (cmd && i.key_pressed(Key::Y)) {
-                if self.project.redo() {
+                if world {
+                    self.world_undo_redo(true);
+                } else if self.project.redo() {
                     self.sync_size_input();
                 }
             } else if cmd && i.key_pressed(Key::S) {
                 self.handle_save_project(shift);
             } else if cmd && i.key_pressed(Key::O) {
                 self.handle_open_project();
+            } else if world {
+                // World Editor shortcuts are handled after this closure.
             } else if cmd && i.key_pressed(Key::P) {
                 self.project.record_undo();
                 self.project.grid.clear();
@@ -76,11 +85,12 @@ impl MagicaVoxelApp {
             // Display shortcuts (Ctrl+E/G/F/U/B/W/M and Ctrl +/- UI scale)
             if cmd && (i.key_pressed(Key::Plus) || i.key_pressed(Key::Equals)) {
                 self.ui_scale = (self.ui_scale + 0.1).clamp(0.75, 2.0);
-                ctx.set_pixels_per_point(self.ui_scale);
+                // Applied after the closure: `ctx` is locked while reading input.
+                self.pending_ui_scale = Some(self.ui_scale);
             }
             if cmd && i.key_pressed(Key::Minus) {
                 self.ui_scale = (self.ui_scale - 0.1).clamp(0.75, 2.0);
-                ctx.set_pixels_per_point(self.ui_scale);
+                self.pending_ui_scale = Some(self.ui_scale);
             }
             if cmd && i.key_pressed(Key::E) {
                 self.display.show_edges = !self.display.show_edges;
@@ -123,7 +133,11 @@ impl MagicaVoxelApp {
 
             // Camera shortcuts (4 / F4 recenter, 5 / F5 90-deg view, 7 / F7 save, 8 / F8 load)
             if !cmd && (i.key_pressed(Key::Num4) || i.key_pressed(Key::F4)) {
-                self.camera.recenter(&self.project.grid);
+                if world {
+                    self.frame_world_camera();
+                } else {
+                    self.camera.recenter(&self.project.grid);
+                }
             }
             if !cmd && (i.key_pressed(Key::Num5) || i.key_pressed(Key::F5)) {
                 self.camera.snap_to_90_view();
@@ -188,5 +202,9 @@ impl MagicaVoxelApp {
                 }
             }
         });
+
+        if self.mode == ViewportMode::WorldEditor {
+            self.handle_world_shortcuts(ctx);
+        }
     }
 }

@@ -10,6 +10,10 @@ impl MagicaVoxelApp {
             .default_width(255.0)
             .show(ctx, |ui| {
                 egui::ScrollArea::vertical().show(ui, |ui| {
+                    if self.mode == ViewportMode::WorldEditor {
+                        self.show_world_panel(ui);
+                        return;
+                    }
                     if self.mode == ViewportMode::PathTracer {
                         ui.heading("Path Tracer (GPU)");
                         ui.label(

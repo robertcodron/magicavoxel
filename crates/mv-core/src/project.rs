@@ -5,9 +5,11 @@ use crate::command::{execute_console_command, CommandOutcome};
 use crate::history::History;
 use crate::material::Material;
 use crate::palette::Palette;
-use crate::scene::Scene;
+use crate::scene::{NodeId, Scene, SceneError, SceneStructure, Transform};
 use crate::selection::{SelectionMask, VoxelClipboard};
 use crate::voxel::VoxelGrid;
+
+const MAX_WORLD_UNDO: usize = 100;
 
 #[derive(Debug, Clone)]
 pub struct EditorProject {
@@ -19,6 +21,9 @@ pub struct EditorProject {
     /// World Editor scene graph (all models, nodes, layers).
     pub scene: Scene,
     pub active_model: usize,
+    /// World Editor undo/redo: scene structure only (never voxel content).
+    pub world_undo: Vec<SceneStructure>,
+    pub world_redo: Vec<SceneStructure>,
     pub palette: Palette,
     pub materials: [Material; 256],
     pub selection: SelectionMask,
@@ -54,6 +59,8 @@ impl Default for EditorProject {
             name: "monu_rust".to_string(),
             scene: Scene::single(grid.clone()),
             active_model: 0,
+            world_undo: Vec::new(),
+            world_redo: Vec::new(),
             grid,
             palette: Palette::default(),
             materials,
@@ -80,6 +87,8 @@ impl EditorProject {
             scene: Scene::single(grid.clone()),
             active_model: 0,
             grid,
+            world_undo: Vec::new(),
+            world_redo: Vec::new(),
             selection: SelectionMask::new(d.x, d.y, d.z),
             ..Default::default()
         }
@@ -119,6 +128,64 @@ impl EditorProject {
         self.selection = SelectionMask::new(d.x, d.y, d.z);
         self.history = History::default();
         true
+    }
+
+    /// Call before any World Editor operation that changes the scene graph or layers.
+    pub fn record_world_undo(&mut self) {
+        self.push_world_undo(self.scene.structure());
+    }
+
+    /// Push a structure captured before a change (UIs that detect changes afterwards).
+    pub fn push_world_undo(&mut self, before: SceneStructure) {
+        if self.world_undo.len() >= MAX_WORLD_UNDO {
+            self.world_undo.remove(0);
+        }
+        self.world_undo.push(before);
+        self.world_redo.clear();
+        self.dirty = true;
+    }
+
+    pub fn world_undo(&mut self) -> bool {
+        match self.world_undo.pop() {
+            Some(prev) => {
+                self.world_redo.push(self.scene.structure());
+                self.scene.restore_structure(prev);
+                true
+            }
+            None => false,
+        }
+    }
+
+    pub fn world_redo(&mut self) -> bool {
+        match self.world_redo.pop() {
+            Some(next) => {
+                self.world_undo.push(self.scene.structure());
+                self.scene.restore_structure(next);
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// `Ctrl+N`: new empty model of the given size, resting on the ground at the origin
+    /// of `parent`. Records a World undo step. Returns the new shape.
+    pub fn add_new_object(
+        &mut self,
+        parent: NodeId,
+        size_x: u32,
+        size_y: u32,
+        size_z: u32,
+    ) -> Result<NodeId, SceneError> {
+        self.record_world_undo();
+        let model = self.scene.add_model(VoxelGrid::new(size_x, size_y, size_z));
+        let shape = self
+            .scene
+            .add_shape(parent, model, Transform::IDENTITY)
+            .and_then(|id| self.scene.move_to_ground(id).map(|_| id));
+        if shape.is_err() {
+            self.world_undo.pop();
+        }
+        shape
     }
 
     pub fn record_undo(&mut self) {

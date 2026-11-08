@@ -14,7 +14,9 @@ pub use history::History;
 pub use material::{Material, MaterialType};
 pub use palette::{Palette, Rgba};
 pub use project::EditorProject;
-pub use scene::{NodeId, NodeKind, Rotation, Scene, SceneError, SceneLayer, SceneNode, Transform};
+pub use scene::{
+    NodeId, NodeKind, Rotation, Scene, SceneError, SceneLayer, SceneNode, SceneStructure, Transform,
+};
 pub use selection::{SelectionMask, VoxelClipboard};
 pub use voxel::{Axis, AxisFlags, VoxelGrid, MAX_GRID_DIM};
 
@@ -151,5 +153,22 @@ mod tests {
         assert!(proj.set_active_model(0));
         assert_eq!(proj.grid.get(1, 1, 1), 9);
         assert!(!proj.set_active_model(42));
+    }
+
+    #[test]
+    fn test_world_undo_redo_structure_only() {
+        let mut proj = EditorProject::new_empty(4, 4, 4);
+        let root = proj.scene.root();
+        let shape = proj.add_new_object(root, 10, 10, 6).unwrap();
+        assert_eq!(proj.scene.world_bounds(shape).unwrap().0.z, 0, "rests on ground");
+        assert_eq!(proj.scene.shapes_under(root).len(), 2);
+
+        proj.grid.set(1, 1, 1, 4); // Model Editor edit after the world op
+        assert!(proj.world_undo());
+        assert_eq!(proj.scene.shapes_under(root).len(), 1);
+        assert_eq!(proj.grid.get(1, 1, 1), 4);
+        assert!(proj.world_redo());
+        assert_eq!(proj.scene.shapes_under(root).len(), 2);
+        assert!(!proj.world_redo());
     }
 }

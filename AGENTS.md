@@ -90,6 +90,7 @@ Aucune dépendance graphique ni I/O disque : 100 % pur Rust et math (`glam`).
 - [`src/lib.rs`](file:///Users/robbie/Code/magicavoxel/crates/mv-render/src/lib.rs) :
   - `OrbitCamera` : caméra orbitale en coordonnées sphériques `Z`-up (`yaw_deg`, `pitch_deg`, `distance`, `target`, `fov_deg`, 10 slots sauvegardables).
   - `dda_raycast_grid` & `pick_voxel` : traversée de grille 3D Amanatides & Woo (retourne le voxel exact `IVec3`, la normale de la face touchée `IVec3` et la distance `t`).
+  - [`src/world.rs`](file:///Users/robbie/Code/magicavoxel/crates/mv-render/src/world.rs) : `WorldView` (shapes visibles placées dans le monde), `render_world_rgba`, `pick_world`. Chaque shape est tracée dans son espace modèle (`world = R·p + offset`, avec +1 sur les axes inversés pour aligner les cellules).
   - `render_viewport_rgba` : rendu temps réel pour le **Model Editor** (parallélisé sur CPU avec `rayon`, incluant Ambient Occlusion analytique par coin de voxel, arêtes, grille `z=0`, cadre englobant, ombres portées et surbrillance de sélection/aperçu brush).
 - [`src/gpu_pathtracer.rs`](file:///Users/robbie/Code/magicavoxel/crates/mv-render/src/gpu_pathtracer.rs) & [`src/pathtrace.wgsl`](file:///Users/robbie/Code/magicavoxel/crates/mv-render/src/pathtrace.wgsl) :
   - `PathTracerEngine` : pipeline Compute `wgpu` exécutant `pathtrace.wgsl` par workgroups de `8x8`.
@@ -104,7 +105,14 @@ Aucune dépendance graphique ni I/O disque : 100 % pur Rust et math (`glam`).
   - `app.rs` : `MagicaVoxelApp` (état), `ViewportMode`, ouverture/sauvegarde/export, et `update()` qui appelle les panneaux dans l'ordre.
   - `shortcuts.rs` : `handle_global_shortcuts`.
   - `ui/top_bar.rs`, `ui/console.rs`, `ui/left_panel.rs` (palette, matériaux, brush), `ui/right_panel.rs` : un panneau egui par fichier.
-  - `viewport.rs` : viewport central (picking, sculpture, rendu DDA ou path tracer).
+  - `viewport.rs` : viewport central (contrôles caméra communs, puis Model Editor, World Editor ou path tracer).
+  - `world_editor.rs` : état du World Editor (`WorldEditorState` : sélection = enfants directs du groupe courant `group`), opérations de scène, raccourcis, interaction viewport.
+  - `ui/world_panel.rs` : Scene Outline, propriétés, Layers.
+  - `tests.rs` : tests d'intégration **headless** (`Harness` : vraies frames egui + événements clavier/souris simulés, `MagicaVoxelApp::with_project` + `frame()`). `world_snapshot` (ignoré) rend un `.vox` en PNG : `VOX_IN=a.vox PNG_OUT=a.png cargo test -p mv-app world_snapshot -- --ignored`.
+- Conventions World Editor :
+  - **Undo** : `finish_world_frame` compare `scene.structure()` en début/fin de frame et pousse un snapshot si changement (une étape par geste). Les opérations `world_*` n'enregistrent donc **jamais** l'undo elles-mêmes ; mettre `world.skip_record = true` pour un changement qui ne doit pas être annulable (undo/redo, ouverture de fichier).
+  - `TAB` est intercepté dans `raw_input_hook` (sinon egui l'utilise pour la navigation au clavier) ; il reste au widget focalisé (console).
+  - Ne jamais appeler une méthode de `ctx` qui écrit (ex. `set_pixels_per_point`) dans une closure `ctx.input(|i| ..)` : verrou egui → blocage. Différer (`pending_ui_scale`).
 - Fonctionnement :
   - Deux modes de vue commutables dans la barre supérieure :
     - `ViewportMode::ModelEditor` : sculpture interactive au clic/glisser (`LButton`), pipette de couleur (`Alt+LButton`), focus caméra (`X+LButton`), panneau Brushes & Transformations.
@@ -117,7 +125,7 @@ Aucune dépendance graphique ni I/O disque : 100 % pur Rust et math (`glam`).
 Lorsque tu reprends le projet, voici les deux chantiers principaux décrits dans [`ROADMAP.md`](file:///Users/robbie/Code/magicavoxel/ROADMAP.md) :
 
 ### Chantier A — Phase 5 : *World Editor* & Graphe de Scène Multi-Objets
-> Les points 1 et 2 sont faits (`scene.rs`, `scene_io.rs`). Reste le point 3 (rendu + UI World Editor).
+> Points 1, 2 et 3 faits (`scene.rs`, `scene_io.rs`, `world.rs`, `world_editor.rs`). Restent : gizmos 3D, copie de groupes, path tracer de la scène entière, BVH (voir `ROADMAP.md`).
 
 1. **Créer `crates/mv-core/src/scene.rs`** :
    - Définir `SceneLayer` (8 calques avec `name`, `color`, `hidden`).

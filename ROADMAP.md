@@ -9,7 +9,7 @@
 | **Phase 3** | *Model Editor* : Brushes (`V`, `F`, `B`, `L`, `C`, `P`), Actions (`T`, `R`, `G`, `N`), Symétries (`Mirror`, `Axis`) & Sélections | ✅ Terminé | 100 % |
 | **Phase 4** | Moteur de Commandes Console (`docs/mv_commands.html`) & Voxel Shaders intégrés (`xs`) | ✅ Terminé | 100 % |
 | **Phase 6** | *Renderer* : Path Tracer GPU (`wgpu` / WGSL), Matériaux PBR (Metal, Glass, Emit, Cloud), DOF & ACES | ✅ Terminé | 90 % |
-| **Phase 5** | *World Editor* : Graphe de scène multi-objets (`nTRN`, `nGRP`, `nSHP`), Instances, Calques (`LAYR`), Gizmos & Booléens | 🚧 En cours | 40 % |
+| **Phase 5** | *World Editor* : Graphe de scène multi-objets (`nTRN`, `nGRP`, `nSHP`), Instances, Calques (`LAYR`), Gizmos & Booléens | 🚧 En cours | 80 % |
 | **Phase 7** | Timeline d'Animation (`0..360`), Shaders GLSL/WGSL externes (`shaders/`), OIDN Denoiser, Marching Cubes & UI avancée | ⏳ À faire | 0 % |
 
 ---
@@ -67,11 +67,20 @@
   - Fichiers pré-0.99 multi-modèles (animations) : frame 0 visible, autres frames en shapes cachées `frame N`.
   - Validé sur 15 fichiers réels (`ephtracy/voxel-model`, `opengametools`, `dot_vox`) via `cargo run -p mv-format --example vox_info -- <fichiers.vox>`.
   - Limites actuelles : seule la première frame d'animation des `nTRN`/`nSHP` est conservée ; `rOBJ`, `rCAM`, `NOTE`, `IMAP` sont ignorés.
-- [ ] **Outils & Raccourcis World Editor (`crates/mv-app`)** :
-  - Bascule `TAB` entre *Model Editor* et *World Editor* (et `TAB` / `Shift+TAB` pour entrer/sortir d'un groupe).
-  - Gizmos 3D de translation et rotation à 90°, alignement au sol (`G`), Union booléenne d'objets (`U`), masquage (`Ctrl+H` / `Ctrl+Shift+H`).
-  - Panneaux UI **Scene Outline** et **Layer Panel** + **Pattern Library**.
-- [ ] **Accélération Spatiale GPU** :
+- [x] **World Editor dans l'app (`crates/mv-app/src/world_editor.rs`, `ui/world_panel.rs`)** :
+  - Mode `🌍 World` ; `TAB` bascule Model ↔ World (ouvre l'objet sélectionné / entre dans le groupe sélectionné), `Shift+TAB` quitte le groupe, `F1` ouvre la console.
+  - Viewport : sélection au clic (`Shift` = ajout), double-clic pour ouvrir, glisser pour déplacer sur un plan horizontal, `Alt+clic` pipette, `X+clic` centre la caméra, `F4` cadre la sélection.
+  - Raccourcis : flèches / `PgUp` / `PgDn` (relatifs à la caméra, `Shift` ×10), `G` sol, `-`/`+` rotation (Z, `Shift` X, `Alt` Y), `U` union, `Ctrl+N` nouvel objet, `Suppr`, `Ctrl+T`, `Ctrl+R` / `Ctrl+Shift+R` grouper / dégrouper, `Ctrl+H` / `Ctrl+Shift+H`, `Ctrl+A` / `Ctrl+D`.
+  - Panneaux **Scene Outline** (arbre, visibilité, fil d'Ariane des groupes), **propriétés** (nom, position, calque, instance / duplicate) et **Layers** (visibilité, couleur, nom, assignation).
+  - Undo/redo dédié (structure de scène uniquement, une étape par geste).
+  - Rendu monde CPU (`crates/mv-render/src/world.rs`) : chaque shape est tracée dans son espace modèle, instances partagées, ombres entre objets, objets hors du groupe courant estompés.
+  - Tests d'intégration headless (`crates/mv-app/src/tests.rs`) pilotant de vraies frames egui (clavier, clics, glisser).
+- [ ] **Reste à faire (World Editor)** :
+  - Gizmos 3D de translation/rotation à la souris, `Ctrl+LButton` (déplacer sur une surface), Pattern Library.
+  - Copier/instancier un groupe entier (seules les shapes sont copiables aujourd'hui).
+  - Path Tracer sur la scène entière (il rend actuellement le modèle actif seul).
+- [ ] **Accélération Spatiale** :
+  - Rendu monde actuel : test AABB linéaire par shape (~36 ms/frame pour 104 objets en `render_scale` 2). Ajouter une BVH CPU puis GPU.
   - Traversée BVH / Sparse Voxel Octree (ou grille de briques à 2 niveaux) dans `mv-render` pour tracer des dizaines d'instances sans les fusionner dans une grille dense unique.
 
 ### ⏳ Phase 7 : Animation, Voxel Shaders GLSL/WGSL Externes & Finitions Avancées

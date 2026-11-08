@@ -1,4 +1,5 @@
 pub mod gpu_pathtracer;
+pub mod world;
 
 use std::collections::HashSet;
 
@@ -7,6 +8,7 @@ use mv_core::{EditorProject, MaterialType, Rgba, VoxelGrid};
 use rayon::prelude::*;
 
 pub use gpu_pathtracer::{PathTracerEngine, PathTracerSettings};
+pub use world::{pick_world, render_world_rgba, Highlight, WorldHit, WorldView};
 
 #[derive(Debug, Clone, Copy)]
 pub struct DisplaySettings {
@@ -92,10 +94,19 @@ impl Default for OrbitCamera {
 
 impl OrbitCamera {
     pub fn recenter(&mut self, grid: &VoxelGrid) {
-        let d = grid.dimensions();
-        self.target = Vec3::new(d.x as f32 * 0.5, d.y as f32 * 0.5, d.z as f32 * 0.4);
-        let max_dim = d.x.max(d.y).max(d.z) as f32;
-        self.distance = (max_dim * 1.85).max(16.0);
+        let d = grid.dimensions().as_vec3();
+        self.frame_box(Vec3::ZERO, d);
+    }
+
+    /// Aim at a box and back off so it fits the view (World Editor `F4`).
+    pub fn frame_box(&mut self, min: Vec3, max: Vec3) {
+        let size = max - min;
+        self.target = Vec3::new(
+            (min.x + max.x) * 0.5,
+            (min.y + max.y) * 0.5,
+            min.z + size.z * 0.4,
+        );
+        self.distance = (size.max_element() * 1.85).max(16.0);
     }
 
     /// `F5 / 5`: snap camera to nearest 90-degree / axial view
@@ -534,7 +545,7 @@ fn shade_ray(
 }
 
 /// Compute smooth analytical Voxel Ambient Occlusion on a hit voxel face
-fn compute_voxel_ao(grid: &VoxelGrid, voxel: IVec3, normal: IVec3, hit_pos: Vec3) -> f32 {
+pub(crate) fn compute_voxel_ao(grid: &VoxelGrid, voxel: IVec3, normal: IVec3, hit_pos: Vec3) -> f32 {
     let local = hit_pos - Vec3::new(voxel.x as f32, voxel.y as f32, voxel.z as f32);
     let (u, v, t_u, t_v) = if normal.x != 0 {
         (
@@ -592,7 +603,7 @@ fn compute_voxel_ao(grid: &VoxelGrid, voxel: IVec3, normal: IVec3, hit_pos: Vec3
     ao_b + (ao_t - ao_b) * v
 }
 
-fn voxel_face_edge_distance(hit_pos: Vec3, normal: IVec3) -> f32 {
+pub(crate) fn voxel_face_edge_distance(hit_pos: Vec3, normal: IVec3) -> f32 {
     let fx = hit_pos.x.rem_euclid(1.0);
     let fy = hit_pos.y.rem_euclid(1.0);
     let fz = hit_pos.z.rem_euclid(1.0);
@@ -609,7 +620,7 @@ fn voxel_face_edge_distance(hit_pos: Vec3, normal: IVec3) -> f32 {
     }
 }
 
-fn intersect_aabb_with_normal(
+pub(crate) fn intersect_aabb_with_normal(
     origin: Vec3,
     dir: Vec3,
     bmin: Vec3,
@@ -651,7 +662,7 @@ fn intersect_aabb_with_normal(
     Some((tmin, tmax, normal))
 }
 
-fn bounding_frame_wire_t(origin: Vec3, dir: Vec3, bmin: Vec3, bmax: Vec3) -> Option<f32> {
+pub(crate) fn bounding_frame_wire_t(origin: Vec3, dir: Vec3, bmin: Vec3, bmax: Vec3) -> Option<f32> {
     let (tmin, tmax, _) = intersect_aabb_with_normal(origin, dir, bmin, bmax)?;
     let t = if tmin > 0.0 { tmin } else { tmax };
     if t <= 0.0 {
