@@ -1,0 +1,30 @@
+// MagicaVoxel-rs sample voxel shader (MIT).
+//
+// xs grow [Color]
+// Each iteration, every empty voxel sitting on a selected color takes a color:
+// `Color` if > 0, otherwise the color below. Animate with: xs -n 8 -prev grow
+//
+// xs_begin
+// author : 'magicavoxel-rs'
+// arg : { name = 'Color'  var = 'm_color'  range = '0 255'  value = '0'  step = '1'  precision = '0' }
+// xs_end
+
+bool isSelected(float p) {
+	for (int i = 0; i < i_num_color_sels; i += 1) {
+		if (p == color_sel(float(i))) {
+			return true;
+		}
+	}
+	return false;
+}
+
+float map(vec3 v) {
+	float index = voxel(v);
+	if (index == 0.0) {
+		float below = voxel(v - vec3(0.0, 0.0, 1.0));
+		if (isSelected(below)) {
+			return m_color > 0.0 ? m_color : below;
+		}
+	}
+	return index;
+}

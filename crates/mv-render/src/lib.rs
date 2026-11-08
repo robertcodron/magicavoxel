@@ -1,4 +1,5 @@
 pub mod gpu_pathtracer;
+pub mod voxel_shader;
 pub mod world;
 
 use std::collections::HashSet;
@@ -8,6 +9,7 @@ use mv_core::{EditorProject, MaterialType, Rgba, VoxelGrid};
 use rayon::prelude::*;
 
 pub use gpu_pathtracer::{PathTracerEngine, PathTracerSettings};
+pub use voxel_shader::{discover_shaders, ShaderArg, ShaderInputs, VoxelShader, VoxelShaderEngine};
 pub use world::{pick_world, render_world_rgba, Highlight, WorldHit, WorldView};
 
 #[derive(Debug, Clone, Copy)]

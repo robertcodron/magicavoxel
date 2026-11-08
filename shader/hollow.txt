@@ -1,0 +1,27 @@
+// MagicaVoxel-rs sample voxel shader (MIT).
+//
+// xs hollow [Thickness]
+// Removes interior voxels, keeping a shell `Thickness` voxels thick.
+//
+// xs_begin
+// author : 'magicavoxel-rs'
+// arg : { name = 'Thickness'  var = 'm_thickness'  range = '1 8'  value = '1'  step = '1'  precision = '0' }
+// xs_end
+
+int thickness = int(m_thickness);
+
+float map(vec3 v) {
+	float index = voxel(v);
+	if (index == 0.0) {
+		return 0.0;
+	}
+	for (int d = 1; d <= thickness; d += 1) {
+		float k = float(d);
+		if (voxel(v + vec3(k, 0.0, 0.0)) == 0.0 || voxel(v - vec3(k, 0.0, 0.0)) == 0.0 ||
+			voxel(v + vec3(0.0, k, 0.0)) == 0.0 || voxel(v - vec3(0.0, k, 0.0)) == 0.0 ||
+			voxel(v + vec3(0.0, 0.0, k)) == 0.0 || voxel(v - vec3(0.0, 0.0, k)) == 0.0) {
+			return index;
+		}
+	}
+	return 0.0;
+}

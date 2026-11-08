@@ -252,6 +252,9 @@ impl MagicaVoxelApp {
                             ui.checkbox(&mut self.project.brush.axis.y, "Y");
                             ui.checkbox(&mut self.project.brush.axis.z, "Z");
                         });
+
+                        ui.separator();
+                        self.show_shader_section(ui);
                     }
                 });
             });

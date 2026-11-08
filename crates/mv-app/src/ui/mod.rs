@@ -3,6 +3,7 @@
 mod console;
 mod left_panel;
 mod right_panel;
+mod shader_panel;
 mod timeline;
 mod top_bar;
 mod world_panel;

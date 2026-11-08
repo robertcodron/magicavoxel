@@ -7,6 +7,7 @@ pub mod project;
 pub mod scene;
 pub mod selection;
 pub mod voxel;
+pub mod xs;
 
 pub use brush::{BrushAction, BrushMode, BrushSettings, VoxelSubShape};
 pub use command::{execute_console_command, CommandOutcome};
@@ -18,6 +19,7 @@ pub use scene::{
     NodeId, NodeKind, Rotation, Scene, SceneError, SceneLayer, SceneNode, SceneStructure, Transform,
 };
 pub use selection::{SelectionMask, VoxelClipboard};
+pub use xs::{parse_xs, XsInvocation, XsMode, XsStep, BUILTIN_SHADERS};
 pub use voxel::{Axis, AxisFlags, VoxelGrid, MAX_GRID_DIM};
 
 #[cfg(test)]
@@ -238,7 +240,11 @@ mod tests {
         proj.run_command("xs -n 2 -prev life").unwrap();
         assert_eq!(proj.active_frame_count(), 6);
 
-        assert!(proj.run_command("xs -n 2 -cur not_a_shader").is_err());
-        assert_eq!(proj.active_frame_count(), 6, "unknown shader adds no frame");
+        // Not built in: handed to the application, nothing changes here.
+        assert!(matches!(
+            proj.run_command("xs -n 2 -cur my_shader"),
+            Ok(CommandOutcome::ExternalShader(_))
+        ));
+        assert_eq!(proj.active_frame_count(), 6);
     }
 }

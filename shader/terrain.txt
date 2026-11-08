@@ -1,0 +1,33 @@
+// MagicaVoxel-rs sample voxel shader (MIT).
+//
+// xs terrain [Height] [Scale] [Seed] [Top Color]
+// Rolling hills from summed sine waves: the brush color below the surface and an
+// optional `Top Color` for the last voxel of each column.
+//
+// xs_begin
+// author : 'magicavoxel-rs'
+// arg : { name = 'Height'     var = 'm_height'  range = '1 100'  value = '40'  step = '1'  precision = '0' }
+// arg : { name = 'Scale'      var = 'm_scale'   range = '1 100'  value = '20'  step = '1'  precision = '0' }
+// arg : { name = 'Seed'       var = 'm_seed'    range = '0 100'  value = '7'   step = '1'  precision = '0' }
+// arg : { name = 'Top Color'  var = 'm_top'     range = '0 255'  value = '0'   step = '1'  precision = '0' }
+// xs_end
+
+float surface(vec2 p) {
+	vec2 q = p / max(m_scale, 1.0) + vec2(m_seed * 1.37, m_seed * 2.11);
+	float h = sin(q.x) * cos(q.y * 0.8)
+		+ 0.5 * sin(q.x * 2.1 + q.y * 1.3)
+		+ 0.25 * cos(q.y * 3.7 - q.x * 0.6);
+	return (h / 1.75 * 0.5 + 0.5) * i_volume_size.z * m_height / 100.0;
+}
+
+float map(vec3 v) {
+	float h = floor(surface(v.xy));
+	float z = floor(v.z);
+	if (z > h) {
+		return 0.0;
+	}
+	if (z == h && m_top > 0.0) {
+		return m_top;
+	}
+	return i_color_index;
+}

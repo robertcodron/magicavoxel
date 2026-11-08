@@ -21,6 +21,6 @@ eframe = "0.31"
 egui = "0.31"
 rfd = "0.15"
 image = { version = "=0.25.5", default-features = false, features = ["png"] }
-wgpu = "24.0"
+wgpu = { version = "24.0", features = ["glsl"] }
 bytemuck = { version = "1.25", features = ["derive"] }
 pollster = "0.4"

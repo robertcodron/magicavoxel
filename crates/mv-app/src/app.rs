@@ -7,6 +7,7 @@ use mv_format::{
 };
 use mv_render::{DisplaySettings, OrbitCamera, PathTracerEngine, PathTracerSettings, RayHit};
 
+use crate::shaders::ShaderPanel;
 use crate::world_editor::WorldEditorState;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -49,6 +50,7 @@ pub(crate) struct MagicaVoxelApp {
     pub(crate) anim_fps: f32,
     /// `egui` time of the last playback step.
     pub(crate) anim_last_step: f64,
+    pub(crate) shaders: ShaderPanel,
 }
 
 impl MagicaVoxelApp {
@@ -99,6 +101,7 @@ impl MagicaVoxelApp {
             anim_playing: false,
             anim_fps: 8.0,
             anim_last_step: 0.0,
+            shaders: ShaderPanel::new(),
         }
     }
 
@@ -111,6 +114,15 @@ impl MagicaVoxelApp {
         match self.project.run_command(cmd) {
             Ok(CommandOutcome::ExportRequested { format, .. }) => {
                 self.handle_export(&format);
+            }
+            Ok(CommandOutcome::ExternalShader(inv)) => {
+                let msg = match self.run_external_shader(&inv) {
+                    Ok(m) => m,
+                    Err(e) => format!("[ERR] {e}"),
+                };
+                self.project
+                    .console_logs
+                    .push(format!("> {} : {}", cmd.trim(), msg));
             }
             Ok(_) => {
                 self.sync_size_input();

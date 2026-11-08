@@ -10,7 +10,7 @@
 | **Phase 4** | Moteur de Commandes Console (`docs/mv_commands.html`) & Voxel Shaders intégrés (`xs`) | ✅ Terminé | 100 % |
 | **Phase 6** | *Renderer* : Path Tracer GPU (`wgpu` / WGSL), Matériaux PBR (Metal, Glass, Emit, Cloud), DOF & ACES | ✅ Terminé | 90 % |
 | **Phase 5** | *World Editor* : Graphe de scène multi-objets (`nTRN`, `nGRP`, `nSHP`), Instances, Calques (`LAYR`), Gizmos & Booléens | 🚧 En cours | 80 % |
-| **Phase 7** | Timeline d'Animation (`0..360`), Shaders GLSL/WGSL externes (`shaders/`), OIDN Denoiser, Marching Cubes & UI avancée | 🚧 En cours | 15 % |
+| **Phase 7** | Timeline d'Animation (`0..360`), Shaders GLSL/WGSL externes (`shaders/`), OIDN Denoiser, Marching Cubes & UI avancée | 🚧 En cours | 30 % |
 
 ---
 
@@ -94,9 +94,12 @@
 - [ ] **Animation (reste)** :
   - Évaluer/éditer les keyframes de transformation (`nTRN` multi-frames : lues et réécrites, pas jouées).
   - Path Tracer sur la frame courante de la scène, export de séquence d'images, *Turntable*, *Motion Blur*.
-- [ ] **Moteur de Voxel Shaders Externes (`shaders/*.xs` / `.wgsl`)** :
-  - Chargement dynamique de fichiers shaders depuis un dossier `shaders/`.
-  - Parsing des annotations `// @arg name default min max` pour générer automatiquement des sliders dans l'interface `egui`.
+- [x] **Voxel Shaders externes compatibles MagicaVoxel (`shader/*.txt`, GLSL)** :
+  - Exécution GPU (`crates/mv-render/src/voxel_shader.rs`) : la source MagicaVoxel (`float map(vec3 v)`) est enveloppée dans un compute shader GLSL 450 compilé par naga (`wgpu` feature `glsl`).
+  - API MagicaVoxel : `voxel()`, `color_sel()`, `palette()`, `i_volume_size`, `i_color_index`, `i_num_color_sels`, `i_iter`, `i_axis`, `i_mirror`, `i_args[16]`, `iFrame`, `iNumFrames`, `iIter`, `iRand` ; arguments `// arg : { name var range value step precision }`.
+  - Adaptations automatiques : initialiseurs de globales déplacés dans une fonction d'init, `return` par défaut en fin de fonction. **51/51 shaders de `lachlanmcdonald/magicavoxel-shaders` compilent et s'exécutent.**
+  - `xs` (console) et panneau **Voxel Shader** (sliders générés depuis l'en-tête, itérations, modes en place / `-prev` / `-cur`) ; dossiers : `MV_SHADER_DIR`, `./shader`, `./shaders`, `shader/` à côté de l'exécutable ; 4 shaders d'exemple dans `shader/`.
+  - Exécution atomique : en cas d'erreur (compilation affichée dans la console), rien n'est modifié ; une étape d'undo par exécution.
 - [ ] **Améliorations du Path Tracer (`mv-render`)** :
   - Éclairage **IBL (`.hdr` equirectangular)** avec *Importance Sampling*.
   - Formes de voxels alternatives dans le ray-tracer : *Lego*, *Sphere*, *Cylinder*, *Clay*, *Marching Cubes*.

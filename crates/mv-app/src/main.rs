@@ -1,4 +1,5 @@
 mod app;
+mod shaders;
 mod shortcuts;
 mod ui;
 mod viewport;

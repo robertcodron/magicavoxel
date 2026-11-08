@@ -73,6 +73,8 @@ Aucune dépendance graphique ni I/O disque : 100 % pur Rust et math (`glam`).
   - Placement monde d'un voxel `v` : `rotation * (v - size/2) + translation` (division entière), composé avec les transforms des groupes parents.
   - Opérations World Editor : instances / duplicats (`Ctrl+T`), `move_to_ground` (`G`), `rotate90`, `union` (`U`), `compact_models`.
   - **Animation** : `NodeKind::Shape { models }` = un modèle par frame (jamais vide) ; `node.model_id()` = frame 0, `scene.shape_model(id)` = frame courante (`scene.current_frame`, hors `SceneStructure`). Toute requête géométrique utilise la frame courante. `extra_transform_keys` = keyframes `nTRN` préservées mais non évaluées.
+- [`src/xs.rs`](file:///Users/robbie/Code/magicavoxel/crates/mv-core/src/xs.rs) :
+  - `parse_xs` (`-n`, `-prev`, `-cur`) et `EditorProject::run_xs(inv, |grid, step| ...)` : exécution commune aux shaders intégrés et externes, sur copie, validée en une seule étape d'undo. Un nom hors `BUILTIN_SHADERS` renvoie `CommandOutcome::ExternalShader`, exécuté par l'app.
 - [`src/project.rs`](file:///Users/robbie/Code/magicavoxel/crates/mv-core/src/project.rs) :
   - `active_shape` = shape dont la timeline du Model Editor parcourt les frames (`open_shape`, `set_frame`, `add_frame`, `delete_frame`, `refresh_active_model`). Les historiques d'undo sont **par modèle** (`model_histories`).
   - `EditorProject.grid` est le modèle **en cours d'édition**, extrait de `scene.models[active_model]` (qui peut être périmé pendant l'édition) : lire les modèles via `project.model(id)`, ou appeler `commit_active_model()` avant de manipuler `scene.models`. `set_active_model` réinitialise l'undo et la sélection (par modèle).
@@ -92,6 +94,7 @@ Aucune dépendance graphique ni I/O disque : 100 % pur Rust et math (`glam`).
 - [`src/lib.rs`](file:///Users/robbie/Code/magicavoxel/crates/mv-render/src/lib.rs) :
   - `OrbitCamera` : caméra orbitale en coordonnées sphériques `Z`-up (`yaw_deg`, `pitch_deg`, `distance`, `target`, `fov_deg`, 10 slots sauvegardables).
   - `dda_raycast_grid` & `pick_voxel` : traversée de grille 3D Amanatides & Woo (retourne le voxel exact `IVec3`, la normale de la face touchée `IVec3` et la distance `t`).
+  - [`src/voxel_shader.rs`](file:///Users/robbie/Code/magicavoxel/crates/mv-render/src/voxel_shader.rs) : voxel shaders MagicaVoxel (GLSL `shader/*.txt`) exécutés sur GPU (`VoxelShaderEngine`, cache de pipelines, erreurs de compilation via error scopes). `build_compute_source` enveloppe la source ; `v` = centre du voxel (+0.5), `voxel()` arrondit à l'entier inférieur. Test de compatibilité : `XS_DIR=dossier cargo test -p mv-render xs_folder_compat -- --ignored --nocapture`.
   - [`src/world.rs`](file:///Users/robbie/Code/magicavoxel/crates/mv-render/src/world.rs) : `WorldView` (shapes visibles placées dans le monde), `render_world_rgba`, `pick_world`. Chaque shape est tracée dans son espace modèle (`world = R·p + offset`, avec +1 sur les axes inversés pour aligner les cellules).
   - `render_viewport_rgba` : rendu temps réel pour le **Model Editor** (parallélisé sur CPU avec `rayon`, incluant Ambient Occlusion analytique par coin de voxel, arêtes, grille `z=0`, cadre englobant, ombres portées et surbrillance de sélection/aperçu brush).
 - [`src/gpu_pathtracer.rs`](file:///Users/robbie/Code/magicavoxel/crates/mv-render/src/gpu_pathtracer.rs) & [`src/pathtrace.wgsl`](file:///Users/robbie/Code/magicavoxel/crates/mv-render/src/pathtrace.wgsl) :
@@ -111,6 +114,7 @@ Aucune dépendance graphique ni I/O disque : 100 % pur Rust et math (`glam`).
   - `world_editor.rs` : état du World Editor (`WorldEditorState` : sélection = enfants directs du groupe courant `group`), opérations de scène, raccourcis, interaction viewport.
   - `ui/world_panel.rs` : Scene Outline, propriétés, Layers.
   - `ui/timeline.rs` : timeline d'animation (barre du bas) et lecture (`tick_animation`, `goto_frame`).
+  - `shaders.rs` + `ui/shader_panel.rs` : découverte des `shader/*.txt`, moteur GPU créé à la demande, panneau Voxel Shader.
   - `tests.rs` : tests d'intégration **headless** (`Harness` : vraies frames egui + événements clavier/souris simulés, `MagicaVoxelApp::with_project` + `frame()`). `world_snapshot` (ignoré) rend un `.vox` en PNG : `VOX_IN=a.vox PNG_OUT=a.png cargo test -p mv-app world_snapshot -- --ignored`.
 - Conventions World Editor :
   - **Undo** : `finish_world_frame` compare `scene.structure()` en début/fin de frame et pousse un snapshot si changement (une étape par geste). Les opérations `world_*` n'enregistrent donc **jamais** l'undo elles-mêmes ; mettre `world.skip_record = true` pour un changement qui ne doit pas être annulable (undo/redo, ouverture de fichier).
@@ -143,7 +147,7 @@ Lorsque tu reprends le projet, voici les deux chantiers principaux décrits dans
    - Afficher les panneaux **Scene Outline** et **Layer Manager** à droite.
 
 ### Chantier B — Phase 7 : Animation, Voxel Shaders Externes & Ergonomie
-> Point 1 (timeline) fait, hors keyframes de transformation. Prochain : point 2 (shaders externes) puis 3 (ergonomie).
+> Points 1 (timeline, hors keyframes de transformation) et 2 (shaders externes, format MagicaVoxel `shader/*.txt` plutôt que `// @arg`) faits. Prochain : point 3 (ergonomie).
 
 1. **Timeline d'Animation (`crates/mv-core` & `crates/mv-app`)** :
    - Stocker `frames: Vec<VoxelGrid>` et `active_frame: usize` par modèle.
