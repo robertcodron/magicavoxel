@@ -14,6 +14,11 @@ struct Harness {
     ctx: egui::Context,
     app: MagicaVoxelApp,
     events: Vec<Event>,
+    dropped: Vec<egui::DroppedFile>,
+    /// Window close button pressed in the next frame.
+    close_request: bool,
+    /// Viewport commands emitted by the last frame (e.g. `CancelClose`).
+    commands: Vec<egui::ViewportCommand>,
     modifiers: Modifiers,
     time: f64,
 }
@@ -34,6 +39,9 @@ impl Harness {
             ctx: egui::Context::default(),
             app,
             events: Vec::new(),
+            dropped: Vec::new(),
+            close_request: false,
+            commands: Vec::new(),
             modifiers: Modifiers::NONE,
             time: 0.0,
         };
@@ -46,13 +54,24 @@ impl Harness {
         let mut raw = RawInput {
             screen_rect: Some(Rect::from_min_size(Pos2::ZERO, SCREEN)),
             events: std::mem::take(&mut self.events),
+            dropped_files: std::mem::take(&mut self.dropped),
             modifiers: self.modifiers,
             time: Some(self.time),
             ..Default::default()
         };
+        if std::mem::take(&mut self.close_request) {
+            let mut info = egui::ViewportInfo::default();
+            info.events.push(egui::ViewportEvent::Close);
+            raw.viewports.insert(egui::ViewportId::ROOT, info);
+        }
         self.time += 1.0 / 60.0;
         self.app.raw_input_hook(&self.ctx, &mut raw);
-        let _ = self.ctx.run(raw, |ctx| self.app.frame(ctx));
+        let out = self.ctx.run(raw, |ctx| self.app.frame(ctx));
+        self.commands = out
+            .viewport_output
+            .get(&egui::ViewportId::ROOT)
+            .map(|v| v.commands.clone())
+            .unwrap_or_default();
     }
 
     fn key_with(&mut self, key: Key, modifiers: Modifiers) {
@@ -510,6 +529,211 @@ fn external_shaders_from_console_and_panel() {
         h.app.shaders.invocation().unwrap().to_command(),
         "xs hollow 1"
     );
+}
+
+/// Unique temporary directory for a test.
+fn temp_dir(tag: &str) -> std::path::PathBuf {
+    let dir = std::env::temp_dir().join(format!(
+        "mv-rs-test-{tag}-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    std::fs::create_dir_all(&dir).unwrap();
+    dir
+}
+
+#[test]
+fn dropping_a_vox_file_opens_it() {
+    let dir = temp_dir("drop");
+    let (proj, _, _) = two_cubes();
+    let path = dir.join("scene.vox");
+    mv_format::save_vox_file(&proj, &path).unwrap();
+
+    let mut h = Harness::new(EditorProject::default());
+    let root = h.app.project.scene.root();
+    assert_eq!(h.app.project.scene.shapes_under(root).len(), 1);
+
+    h.dropped.push(egui::DroppedFile {
+        path: Some(path.clone()),
+        ..Default::default()
+    });
+    h.step();
+    let root = h.app.project.scene.root();
+    assert_eq!(
+        h.app.project.scene.shapes_under(root).len(),
+        2,
+        "dropped scene loaded"
+    );
+    assert_eq!(h.app.current_file.as_deref(), Some(path.as_path()));
+
+    h.dropped.push(egui::DroppedFile {
+        path: Some(dir.join("image.png")),
+        ..Default::default()
+    });
+    h.step();
+    let log = h.app.project.console_logs.last().unwrap();
+    assert!(log.contains("Unsupported file dropped"), "{log}");
+    assert_eq!(h.app.project.scene.shapes_under(root).len(), 2);
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
+fn auto_backup_every_25_modifications() {
+    let dir = temp_dir("backup");
+    let path = dir.join("cache").join("backup.vox");
+    let mut h = Harness::new(EditorProject::new_empty(8, 8, 8));
+    h.app.backup.path = path.clone();
+
+    for i in 0..24 {
+        h.app.project.record_undo();
+        h.app.project.grid.set(i % 8, 0, 0, 3);
+        h.step();
+    }
+    h.app.wait_backup();
+    assert!(!path.exists(), "no backup before 25 edits");
+
+    h.app.project.record_undo();
+    h.app.project.grid.set(0, 5, 5, 9);
+    h.step();
+    h.app.wait_backup();
+    assert!(path.exists(), "backup written at the 25th edit");
+    let log = h.app.project.console_logs.last().unwrap();
+    assert!(log.contains("Auto-backup saved"), "{log}");
+    let restored = mv_format::load_vox_file(&path).unwrap();
+    assert_eq!(restored.grid.get(0, 5, 5), 9);
+    assert!(
+        !path.with_extension("vox.tmp").exists(),
+        "temporary file renamed"
+    );
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
+fn view_cube_snaps_camera_without_sculpting() {
+    let mut h = Harness::new(EditorProject::default());
+    let solid = h.app.project.grid.count_solid();
+    let cube_rect = crate::view_cube::view_cube_rect(h.app.viewport_rect);
+    let face = |h: &Harness, label: &str| {
+        crate::view_cube::view_cube_faces(&h.app.camera, cube_rect)
+            .into_iter()
+            .find(|f| f.label == label)
+            .map(|f| f.center())
+    };
+
+    let top = face(&h, "Top").expect("default camera looks down on the top face");
+    h.click(top);
+    assert_eq!(h.app.camera.pitch_deg, 89.0);
+
+    h.app.camera.pitch_deg = 30.0;
+    h.app.camera.yaw_deg = -60.0; // looking at the -Y (Front) and +X (Right) faces
+    h.step();
+    let front = face(&h, "Front").expect("front face visible");
+    h.click(front);
+    assert_eq!((h.app.camera.yaw_deg, h.app.camera.pitch_deg), (-90.0, 0.0));
+
+    assert_eq!(
+        h.app.project.grid.count_solid(),
+        solid,
+        "the click did not sculpt"
+    );
+    assert!(!h.app.project.history.can_undo());
+}
+
+#[test]
+fn opening_over_unsaved_changes_asks_first() {
+    use crate::unsaved::{PendingAction, UnsavedChoice};
+    let dir = temp_dir("unsaved");
+    let (other, _, _) = two_cubes();
+    let other_path = dir.join("other.vox");
+    mv_format::save_vox_file(&other, &other_path).unwrap();
+
+    let mut h = Harness::new(EditorProject::default());
+    let drop = |h: &mut Harness| {
+        h.dropped.push(egui::DroppedFile {
+            path: Some(other_path.clone()),
+            ..Default::default()
+        });
+        h.step();
+    };
+    let shapes = |h: &Harness| {
+        let root = h.app.project.scene.root();
+        h.app.project.scene.shapes_under(root).len()
+    };
+
+    // Clean project: opens directly.
+    assert!(!h.app.project.dirty);
+    drop(&mut h);
+    assert_eq!(shapes(&h), 2);
+
+    // Dirty project: the dialog is shown and nothing is replaced yet.
+    h.app.project.record_undo();
+    h.app.project.grid.set(0, 0, 0, 3);
+    let edited = h.app.project.grid.clone();
+    drop(&mut h);
+    assert_eq!(
+        h.app.pending_action,
+        Some(PendingAction::Open(other_path.clone()))
+    );
+    assert_eq!(h.app.project.grid, edited);
+    // Shortcuts are blocked while the dialog is open.
+    h.key(Key::Tab);
+    assert_eq!(h.app.mode, ViewportMode::ModelEditor);
+
+    // Escape = cancel.
+    h.key(Key::Escape);
+    assert!(h.app.pending_action.is_none());
+    assert_eq!(h.app.project.grid, edited);
+
+    // Save: writes the current file, then opens the new one.
+    let current = dir.join("current.vox");
+    h.app.current_file = Some(current.clone());
+    drop(&mut h);
+    h.app.resolve_pending(&h.ctx.clone(), UnsavedChoice::Save);
+    assert!(current.exists(), "changes saved first");
+    assert_eq!(
+        mv_format::load_vox_file(&current)
+            .unwrap()
+            .grid
+            .get(0, 0, 0),
+        3
+    );
+    assert_eq!(h.app.current_file.as_deref(), Some(other_path.as_path()));
+
+    // Discard.
+    h.app.project.record_undo();
+    drop(&mut h);
+    h.app
+        .resolve_pending(&h.ctx.clone(), UnsavedChoice::Discard);
+    assert!(!h.app.project.dirty, "fresh project loaded");
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
+fn closing_with_unsaved_changes_is_cancelled_until_confirmed() {
+    use crate::unsaved::{PendingAction, UnsavedChoice};
+    let mut h = Harness::new(EditorProject::default());
+
+    // Clean: the close goes through (no CancelClose).
+    h.close_request = true;
+    h.step();
+    assert!(!h.commands.contains(&egui::ViewportCommand::CancelClose));
+
+    h.app.project.record_undo();
+    h.close_request = true;
+    h.step();
+    assert!(h.commands.contains(&egui::ViewportCommand::CancelClose));
+    assert_eq!(h.app.pending_action, Some(PendingAction::Quit));
+
+    let ctx = h.ctx.clone();
+    let out = ctx.run(RawInput::default(), |ctx| {
+        h.app.resolve_pending(ctx, UnsavedChoice::Discard);
+    });
+    let cmds = &out.viewport_output[&egui::ViewportId::ROOT].commands;
+    assert!(cmds.contains(&egui::ViewportCommand::Close));
+    assert!(h.app.allow_close);
 }
 
 /// Manual visual check: `VOX_IN=scene.vox PNG_OUT=out.png cargo test -p mv-app

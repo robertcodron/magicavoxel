@@ -73,6 +73,24 @@ impl MagicaVoxelApp {
                     self.handle_save_screenshot();
                 }
                 ui.menu_button("📤 Export", |ui| {
+                    if ui
+                        .button("glTF scene .glb (all objects)")
+                        .on_hover_text("Whole scene: groups, instances, materials (console: o glb)")
+                        .clicked()
+                    {
+                        ui.close_menu();
+                        self.handle_export("glb");
+                    }
+                    if ui
+                        .button("glTF scene .gltf (JSON)")
+                        .on_hover_text("Same as .glb, as JSON with an embedded buffer (o gltf)")
+                        .clicked()
+                    {
+                        ui.close_menu();
+                        self.handle_export("gltf");
+                    }
+                    ui.separator();
+                    ui.label(egui::RichText::new("Edited model only").small());
                     if ui.button("Wavefront .obj (Greedy Mesh)").clicked() {
                         ui.close_menu();
                         self.handle_export("obj");

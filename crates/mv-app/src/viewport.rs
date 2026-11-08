@@ -263,6 +263,7 @@ impl MagicaVoxelApp {
                         Color32::WHITE,
                     );
                 }
+                self.show_view_cube(ui, rect);
             });
     }
 }

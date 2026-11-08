@@ -10,7 +10,7 @@
 | **Phase 4** | Moteur de Commandes Console (`docs/mv_commands.html`) & Voxel Shaders intégrés (`xs`) | ✅ Terminé | 100 % |
 | **Phase 6** | *Renderer* : Path Tracer GPU (`wgpu` / WGSL), Matériaux PBR (Metal, Glass, Emit, Cloud), DOF & ACES | ✅ Terminé | 90 % |
 | **Phase 5** | *World Editor* : Graphe de scène multi-objets (`nTRN`, `nGRP`, `nSHP`), Instances, Calques (`LAYR`), Gizmos & Booléens | 🚧 En cours | 80 % |
-| **Phase 7** | Timeline d'Animation (`0..360`), Shaders GLSL/WGSL externes (`shaders/`), OIDN Denoiser, Marching Cubes & UI avancée | 🚧 En cours | 30 % |
+| **Phase 7** | Timeline d'Animation (`0..360`), Shaders GLSL/WGSL externes (`shaders/`), OIDN Denoiser, Marching Cubes & UI avancée | 🚧 En cours | 50 % |
 
 ---
 
@@ -104,11 +104,17 @@
   - Éclairage **IBL (`.hdr` equirectangular)** avec *Importance Sampling*.
   - Formes de voxels alternatives dans le ray-tracer : *Lego*, *Sphere*, *Cylinder*, *Clay*, *Marching Cubes*.
   - Filtre de **Bloom** HDR étiré et **Intel Open Image Denoise (OIDN)** (avec buffers auxiliaires Albedo + Normal).
+- [x] **Export glTF 2.0 de la scène** (`crates/mv-format/src/gltf.rs`, `.glb` / `.gltf`) :
+  - Hiérarchie groupes/objets, instances partagées (un mesh par modèle), greedy meshing par couleur, matériaux PBR (diffus, métal, verre en `BLEND`, émissif + `KHR_materials_emissive_strength`), conversion Z-up → Y-up et échelle, objets/calques cachés exclus.
+  - Validé par le **Khronos glTF Validator** (0 erreur, 0 avertissement) et importé dans Blender ; outil : `cargo run -p mv-format --example vox_to_gltf -- in.vox out.glb [échelle]`.
+  - Limites : frame d'animation courante seulement ; pas encore de réglage d'échelle dans l'UI (1 voxel = 1 unité).
 - [ ] **Imports / Exports Supplémentaires (`mv-format`)** :
   - Export **Marching Cubes** (`.ply` / `.obj`) et **glTF 2.0 (`.gltf` / `.glb`)** avec atlas de textures UV et **Light Baking** (AO par sommet/face).
   - Import de formats `.qb`, `.xraw`, `.schematic`, heightmaps `.png` et voxelisation de maillages `.obj`.
-- [ ] **Ergonomie UI (`mv-app`)** :
-  - **View Cube 3D** interactif dessiné dans le coin supérieur droit du viewport.
-  - **Drag & Drop** de fichiers `.vox` / `.png` directement dans la fenêtre.
-  - **Auto-Backup** asynchrone toutes les 25 actions dans `cache/backup.vox` et personnalisation des raccourcis via `config/hotkey.txt`.
+- [x] **Ergonomie UI (`mv-app`)** :
+  - **View Cube** (`view_cube.rs`) en haut à droite du viewport : orientation de la caméra, clic sur une face = vue axiale (Top/Bottom/Left/Right/Front/Back).
+  - **Glisser-déposer** d'un `.vox` dans la fenêtre (message pendant le survol ; autres formats signalés dans la console).
+  - **Auto-backup** (`backup.rs`) toutes les 25 modifications (`EditorProject::edit_count`) dans `cache/backup.vox`, écrit en arrière-plan (fichier temporaire puis renommage), attendu à la fermeture.
+  - **Confirmation des modifications non sauvegardées** (`unsaved.rs`) avant d'ouvrir un autre fichier (dialogue ou glisser-déposer) ou de quitter : Enregistrer / Ne pas enregistrer / Annuler.
+- [ ] **Ergonomie (reste)** : personnalisation des raccourcis via `config/hotkey.txt`, import `.png` par glisser-déposer.
 

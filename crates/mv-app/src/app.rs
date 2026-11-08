@@ -3,11 +3,14 @@ use std::path::PathBuf;
 use eframe::egui::{self, Color32, TextureHandle};
 use mv_core::{CommandOutcome, EditorProject, Material};
 use mv_format::{
-    export_obj_greedy, export_ply_point_cloud, export_slice_png, load_vox_file, save_vox_file,
+    export_gltf, export_obj_greedy, export_ply_point_cloud, export_slice_png, load_vox_file,
+    save_vox_file, GltfOptions,
 };
 use mv_render::{DisplaySettings, OrbitCamera, PathTracerEngine, PathTracerSettings, RayHit};
 
+use crate::backup::AutoBackup;
 use crate::shaders::ShaderPanel;
+use crate::unsaved::PendingAction;
 use crate::world_editor::WorldEditorState;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -51,6 +54,11 @@ pub(crate) struct MagicaVoxelApp {
     /// `egui` time of the last playback step.
     pub(crate) anim_last_step: f64,
     pub(crate) shaders: ShaderPanel,
+    pub(crate) backup: AutoBackup,
+    /// Action waiting for the "unsaved changes" dialog.
+    pub(crate) pending_action: Option<PendingAction>,
+    /// Set once the user confirmed quitting (lets the next close request through).
+    pub(crate) allow_close: bool,
 }
 
 impl MagicaVoxelApp {
@@ -102,6 +110,9 @@ impl MagicaVoxelApp {
             anim_fps: 8.0,
             anim_last_step: 0.0,
             shaders: ShaderPanel::new(),
+            backup: AutoBackup::new(),
+            pending_action: None,
+            allow_close: false,
         }
     }
 
@@ -137,9 +148,17 @@ impl MagicaVoxelApp {
             .add_filter("MagicaVoxel", &["vox"])
             .pick_file()
         {
+            self.request_open_path(path);
+        }
+    }
+
+    /// Load a `.vox` file into the editor (open dialog, drag & drop).
+    pub(crate) fn open_vox_path(&mut self, path: PathBuf) {
+        {
             match load_vox_file(&path) {
                 Ok(proj) => {
                     self.project = proj;
+                    self.backup.reset();
                     self.reset_world_state();
                     if self.mode == ViewportMode::WorldEditor {
                         self.frame_world_camera();
@@ -233,6 +252,8 @@ impl MagicaVoxelApp {
         let ext = match fmt.as_str() {
             "obj" => "obj",
             "ply" => "ply",
+            "glb" => "glb",
+            "gltf" => "gltf",
             "slice" | "png" => "png",
             _ => "vox",
         };
@@ -242,6 +263,17 @@ impl MagicaVoxelApp {
             .save_file()
         {
             let res = match ext {
+                "glb" | "gltf" => {
+                    export_gltf(&self.project, &path, &GltfOptions::default()).map(|doc| {
+                        format!(
+                            "Exported glTF scene ({} nodes, {} meshes, {} triangles) to {}",
+                            doc.nodes.len(),
+                            doc.meshes.len(),
+                            doc.triangle_count(),
+                            path.display()
+                        )
+                    })
+                }
                 "obj" => export_obj_greedy(&self.project, &path)
                     .map(|q| format!("Exported OBJ ({} greedy quads) to {}", q, path.display())),
                 "ply" => export_ply_point_cloud(&self.project, &path)
@@ -288,13 +320,21 @@ impl eframe::App for MagicaVoxelApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         self.frame(ctx);
     }
+
+    /// Let a running auto-backup finish writing before the process exits.
+    fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
+        self.wait_backup();
+    }
 }
 
 impl MagicaVoxelApp {
     /// One UI frame (separate from `eframe::App::update` so tests can drive it).
     pub(crate) fn frame(&mut self, ctx: &egui::Context) {
+        self.handle_close_request(ctx);
         if let Some(shift) = self.pending_tab.take() {
-            self.handle_tab(shift);
+            if self.pending_action.is_none() {
+                self.handle_tab(shift);
+            }
         }
         let world_before =
             (self.mode == ViewportMode::WorldEditor).then(|| self.project.scene.structure());
@@ -311,7 +351,51 @@ impl MagicaVoxelApp {
         self.show_left_panel(ctx);
         self.show_right_panel(ctx);
         self.show_viewport(ctx);
+        self.handle_dropped_files(ctx);
+
+        self.show_unsaved_dialog(ctx);
 
         self.finish_world_frame(ctx, world_before);
+        self.tick_auto_backup();
+    }
+
+    /// Drag & drop: open a dropped `.vox` file; show a hint while files hover the window.
+    fn handle_dropped_files(&mut self, ctx: &egui::Context) {
+        let (dropped, hovering) = ctx.input(|i| {
+            let dropped: Vec<PathBuf> = i
+                .raw
+                .dropped_files
+                .iter()
+                .filter_map(|f| f.path.clone())
+                .collect();
+            (dropped, !i.raw.hovered_files.is_empty())
+        });
+        if hovering {
+            let screen = ctx.screen_rect();
+            let painter = ctx.layer_painter(egui::LayerId::new(
+                egui::Order::Foreground,
+                egui::Id::new("drop_overlay"),
+            ));
+            painter.rect_filled(screen, 0.0, Color32::from_black_alpha(150));
+            painter.text(
+                screen.center(),
+                egui::Align2::CENTER_CENTER,
+                "Drop a .vox file to open it",
+                egui::FontId::proportional(26.0),
+                Color32::WHITE,
+            );
+        }
+        let is_vox = |p: &PathBuf| p.extension().is_some_and(|e| e.eq_ignore_ascii_case("vox"));
+        match dropped.iter().find(|p| is_vox(p)) {
+            Some(path) => self.request_open_path(path.clone()),
+            None => {
+                for p in &dropped {
+                    self.project.console_logs.push(format!(
+                        "[ERR] Unsupported file dropped: {} (only .vox for now)",
+                        p.display()
+                    ));
+                }
+            }
+        }
     }
 }

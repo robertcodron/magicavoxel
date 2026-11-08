@@ -1,7 +1,10 @@
 mod app;
+mod backup;
 mod shaders;
 mod shortcuts;
 mod ui;
+mod unsaved;
+mod view_cube;
 mod viewport;
 mod world_editor;
 

@@ -6,7 +6,15 @@ use std::path::Path;
 use mv_core::{EditorProject, Material, MaterialType, Palette, Rgba};
 use thiserror::Error;
 
+mod gltf;
+mod mesh;
 mod scene_io;
+
+pub use gltf::{
+    export_gltf, to_glb_bytes, to_gltf, to_gltf_json, GltfExport, GltfMaterial, GltfMesh, GltfNode,
+    GltfOptions, GltfPrimitive,
+};
+pub use mesh::{greedy_quads, GreedyQuad};
 
 #[derive(Debug, Error)]
 pub enum FormatError {
@@ -148,164 +156,57 @@ pub fn load_vox_file(path: impl AsRef<Path>) -> Result<EditorProject, FormatErro
     Ok(project)
 }
 
-/// Export `VoxelGrid` to Wavefront `.obj` using 2D Greedy Meshing per slice to minimize quad count
+/// Wavefront `.obj` export of the edited model with greedy meshing and vertex colors.
+/// Axes are converted from MagicaVoxel (Z up) to OBJ (Y up) with `(x, y, z) -> (x, z, -y)`
+/// (a proper rotation: no mirroring, faces stay counter-clockwise from outside).
 pub fn export_obj_greedy(
     project: &EditorProject,
     path: impl AsRef<Path>,
 ) -> Result<usize, FormatError> {
-    let grid = &project.grid;
-    let file = File::create(path)?;
-    let mut w = BufWriter::new(file);
-
+    let quads = mesh::greedy_quads(&project.grid);
+    let mut w = BufWriter::new(File::create(path)?);
     writeln!(w, "# Exported by MagicaVoxel Rust Edition (Greedy Meshing)")?;
     writeln!(w, "o {}", project.name)?;
 
-    let mut vertices: Vec<[f32; 3]> = Vec::new();
-    let mut normals: Vec<[f32; 3]> = Vec::new();
-    let mut colors: Vec<Rgba> = Vec::new();
-    let mut quads: Vec<([usize; 4], usize)> = Vec::new();
-
-    let dims = [
-        grid.size_x() as i32,
-        grid.size_y() as i32,
-        grid.size_z() as i32,
-    ];
-
-    // Sweep along each axis d in 0..3 and sign in [-1, +1]
-    for d in 0..3usize {
-        let u = (d + 1) % 3;
-        let v = (d + 2) % 3;
-        let du = dims[u] as usize;
-        let dv = dims[v] as usize;
-
-        for &dir in &[-1i32, 1i32] {
-            let mut n = [0.0f32; 3];
-            n[d] = dir as f32;
-            normals.push(n);
-            let normal_idx = normals.len();
-
-            for slice in 0..dims[d] {
-                let mut mask = vec![0u8; du * dv];
-                for j in 0..dv {
-                    for i in 0..du {
-                        let mut pos = [0i32; 3];
-                        pos[d] = slice;
-                        pos[u] = i as i32;
-                        pos[v] = j as i32;
-                        let c = grid.get_i32(pos[0], pos[1], pos[2]);
-                        if c != 0 {
-                            let mut npos = pos;
-                            npos[d] += dir;
-                            if grid.get_i32(npos[0], npos[1], npos[2]) == 0 {
-                                mask[i + j * du] = c;
-                            }
-                        }
-                    }
-                }
-
-                // Greedy 2D rectangle merge on `mask`
-                for j in 0..dv {
-                    let mut i = 0;
-                    while i < du {
-                        let c = mask[i + j * du];
-                        if c == 0 {
-                            i += 1;
-                            continue;
-                        }
-                        let mut width = 1;
-                        while i + width < du && mask[i + width + j * du] == c {
-                            width += 1;
-                        }
-                        let mut height = 1;
-                        'outer: while j + height < dv {
-                            for k in 0..width {
-                                if mask[i + k + (j + height) * du] != c {
-                                    break 'outer;
-                                }
-                            }
-                            height += 1;
-                        }
-
-                        // Clear merged region
-                        for hj in 0..height {
-                            for wi in 0..width {
-                                mask[i + wi + (j + hj) * du] = 0;
-                            }
-                        }
-
-                        let plane_coord = if dir > 0 { slice + 1 } else { slice } as f32;
-                        let u0 = i as f32;
-                        let u1 = (i + width) as f32;
-                        let v0 = j as f32;
-                        let v1 = (j + height) as f32;
-
-                        let make_vert = |uu: f32, vv: f32| -> [f32; 3] {
-                            let mut pt = [0.0f32; 3];
-                            pt[d] = plane_coord;
-                            pt[u] = uu;
-                            pt[v] = vv;
-                            // Convert MV (X, Y-depth, Z-up) to standard OBJ (X, Z-up -> Y, -Y -> Z)
-                            [pt[0], pt[2], pt[1]]
-                        };
-
-                        let corners = if dir > 0 {
-                            [
-                                make_vert(u0, v0),
-                                make_vert(u1, v0),
-                                make_vert(u1, v1),
-                                make_vert(u0, v1),
-                            ]
-                        } else {
-                            [
-                                make_vert(u0, v0),
-                                make_vert(u0, v1),
-                                make_vert(u1, v1),
-                                make_vert(u1, v0),
-                            ]
-                        };
-
-                        let base_v = vertices.len() + 1;
-                        let col = project.palette.colors[c as usize];
-                        for corner in corners {
-                            vertices.push(corner);
-                            colors.push(col);
-                        }
-                        quads.push(([base_v, base_v + 1, base_v + 2, base_v + 3], normal_idx));
-
-                        i += width;
-                    }
-                }
-            }
+    let y_up = |p: [f32; 3]| [p[0], p[2], -p[1]];
+    for q in &quads {
+        let col = project.palette.colors[q.color as usize];
+        for c in q.corners {
+            let v = y_up(c);
+            writeln!(
+                w,
+                "v {:.3} {:.3} {:.3} {:.4} {:.4} {:.4}",
+                v[0],
+                v[1],
+                v[2],
+                col.r as f32 / 255.0,
+                col.g as f32 / 255.0,
+                col.b as f32 / 255.0
+            )?;
         }
     }
-
-    for (v, col) in vertices.iter().zip(colors.iter()) {
+    // The six axis normals, indexed 1..=6.
+    let normals: [[i32; 3]; 6] = [[-1, 0, 0], [1, 0, 0], [0, -1, 0], [0, 1, 0], [0, 0, -1], [0, 0, 1]];
+    for n in normals {
+        let m = y_up([n[0] as f32, n[1] as f32, n[2] as f32]);
+        writeln!(w, "vn {} {} {}", m[0], m[1], m[2])?;
+    }
+    for (k, q) in quads.iter().enumerate() {
+        let n = 1 + normals.iter().position(|&n| n == q.normal).unwrap_or(0);
+        let b = 4 * k + 1;
         writeln!(
             w,
-            "v {:.3} {:.3} {:.3} {:.4} {:.4} {:.4}",
-            v[0],
-            v[1],
-            v[2],
-            col.r as f32 / 255.0,
-            col.g as f32 / 255.0,
-            col.b as f32 / 255.0
+            "f {}//{n} {}//{n} {}//{n} {}//{n}",
+            b,
+            b + 1,
+            b + 2,
+            b + 3
         )?;
     }
-    for n in &normals {
-        writeln!(w, "vn {:.3} {:.3} {:.3}", n[0], n[2], n[1])?;
-    }
-    for (q, n_idx) in &quads {
-        writeln!(
-            w,
-            "f {}//{} {}//{} {}//{} {}//{}",
-            q[0], n_idx, q[1], n_idx, q[2], n_idx, q[3], n_idx
-        )?;
-    }
-
+    w.flush()?;
     Ok(quads.len())
 }
 
-/// Export voxel point cloud to Stanford `.ply` format (`o ply`)
 pub fn export_ply_point_cloud(
     project: &EditorProject,
     path: impl AsRef<Path>,
@@ -821,5 +722,41 @@ mod tests {
         let proj = from_vox_bytes(&file).expect("decode");
         let s = proj.active_shape.unwrap();
         assert_eq!(proj.scene.node(s).unwrap().frame_models(), &[0, 0, 0, 1]);
+    }
+
+    #[test]
+    fn test_loaded_files_start_from_plain_materials() {
+        // A file whose MATL for index 19 only sets the type must not inherit the demo
+        // project's emissive preset on that index.
+        let mut proj = EditorProject::new_empty(2, 2, 2);
+        proj.grid.set(0, 0, 0, 19);
+        proj.materials[20].kind = MaterialType::Metal; // forces MATL chunks to exist
+        let decoded = from_vox_bytes(&to_vox_bytes(&proj)).unwrap();
+        assert_eq!(decoded.materials[19], Material { id: 19, ..Default::default() });
+        assert_eq!(decoded.materials[79].kind, MaterialType::Diffuse);
+        assert_eq!(decoded.materials[217].kind, MaterialType::Diffuse);
+    }
+
+    #[test]
+    fn test_obj_export_is_a_rotation_not_a_mirror() {
+        // A voxel at the back (high Y) and the top (high Z) of a 2x4x3 model.
+        let mut proj = EditorProject::new_empty(2, 4, 3);
+        proj.grid.set(0, 3, 2, 5);
+        let path = std::env::temp_dir().join(format!("mv-rs-obj-{}.obj", std::process::id()));
+        export_obj_greedy(&proj, &path).unwrap();
+        let text = std::fs::read_to_string(&path).unwrap();
+        let _ = std::fs::remove_file(&path);
+        let verts: Vec<[f32; 3]> = text
+            .lines()
+            .filter_map(|l| l.strip_prefix("v "))
+            .map(|l| {
+                let v: Vec<f32> = l.split_whitespace().take(3).map(|x| x.parse().unwrap()).collect();
+                [v[0], v[1], v[2]]
+            })
+            .collect();
+        assert_eq!(verts.len(), 24);
+        // MagicaVoxel up (Z in 2..3) becomes OBJ up (Y); depth Y in 3..4 becomes -Z.
+        assert!(verts.iter().all(|v| (2.0..=3.0).contains(&v[1])));
+        assert!(verts.iter().all(|v| (-4.0..=-3.0).contains(&v[2])));
     }
 }

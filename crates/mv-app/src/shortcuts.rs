@@ -5,6 +5,9 @@ use crate::app::{MagicaVoxelApp, ViewportMode};
 
 impl MagicaVoxelApp {
     pub(crate) fn handle_global_shortcuts(&mut self, ctx: &egui::Context) {
+        if self.pending_action.is_some() {
+            return; // the "unsaved changes" dialog is modal
+        }
         let text_focused = ctx.memory(|m| m.focused().is_some());
 
         ctx.input(|i| {

@@ -78,6 +78,7 @@ Aucune dépendance graphique ni I/O disque : 100 % pur Rust et math (`glam`).
 - [`src/project.rs`](file:///Users/robbie/Code/magicavoxel/crates/mv-core/src/project.rs) :
   - `active_shape` = shape dont la timeline du Model Editor parcourt les frames (`open_shape`, `set_frame`, `add_frame`, `delete_frame`, `refresh_active_model`). Les historiques d'undo sont **par modèle** (`model_histories`).
   - `EditorProject.grid` est le modèle **en cours d'édition**, extrait de `scene.models[active_model]` (qui peut être périmé pendant l'édition) : lire les modèles via `project.model(id)`, ou appeler `commit_active_model()` avant de manipuler `scene.models`. `set_active_model` réinitialise l'undo et la sélection (par modèle).
+  - `EditorProject::new_empty` part de matériaux neutres (`Material::default_table()`) ; seuls `Default::default()` (projet de démo) a des presets émissif/métal/verre.
   - `EditorProject` : agrège `VoxelGrid`, `Scene`, `Palette`, `[Material; 256]`, `SelectionMask`, `VoxelClipboard`, `BrushSettings`, `History` et l'historique de la console.
 
 ### 3.2 `crates/mv-format` (Sérialisation `.vox` & Exports 3D/2D)
@@ -86,7 +87,9 @@ Aucune dépendance graphique ni I/O disque : 100 % pur Rust et math (`glam`).
   - Outil de diagnostic : `cargo run -p mv-format --example vox_info -- fichier.vox` affiche le graphe de scène et vérifie le roundtrip.
   - `MATL` : flottants écrits en représentation exacte (`{}`), `_ior` stocké en **`ior - 1`** (convention MagicaVoxel), ids `1..=255` seulement. Tous les champs de `Material` sont lus/écrits (`_weight`, `_rough`, `_spec`, `_ior`, `_att`, `_flux`, `_emit`, `_ldr`, `_metal`, `_alpha`/`_trans`, `_d` pour la densité). Seuls les matériaux différents du défaut sont écrits.
   - **Subtilité du format `.vox` pour `RGBA` :** Dans la spécification `.vox` d'Ephtracy, l'entrée `0` du chunk `RGBA` stocke la couleur d'index `1` de la palette (et ainsi de suite de `0..254` -> `1..255`). Ce décalage est déjà géré dans `mv-format`.
-  - `export_obj_greedy` : export Wavefront `.obj` avec **Greedy Meshing 2D par tranche** (fusionne les faces adjacentes coplanaires de même couleur en quads optimisés).
+  - [`src/mesh.rs`](file:///Users/robbie/Code/magicavoxel/crates/mv-format/src/mesh.rs) : `greedy_quads` (greedy meshing 2D par tranche, quads CCW vus de l'extérieur, axes MagicaVoxel), partagé par les exports.
+  - `export_obj_greedy` : export Wavefront `.obj` du modèle édité ; conversion d'axes **`(x, y, z) -> (x, z, -y)`** (rotation, pas de miroir).
+  - [`src/gltf.rs`](file:///Users/robbie/Code/magicavoxel/crates/mv-format/src/gltf.rs) : export glTF 2.0 de **toute la scène** (`to_gltf` construit un document typé testable, puis `to_glb_bytes` / `to_gltf_json`). Matrices de nœuds `[R | t + n(R)]` (même convention que le rendu monde ; ces décalages se composent exactement le long de la hiérarchie).
   - `export_ply_point_cloud` : export `.ply` des voxels de surface visibles.
   - `export_slice_png` : export d'une bande PNG 2D de taille `(size_x, size_y * size_z)`.
 
@@ -115,6 +118,9 @@ Aucune dépendance graphique ni I/O disque : 100 % pur Rust et math (`glam`).
   - `ui/world_panel.rs` : Scene Outline, propriétés, Layers.
   - `ui/timeline.rs` : timeline d'animation (barre du bas) et lecture (`tick_animation`, `goto_frame`).
   - `shaders.rs` + `ui/shader_panel.rs` : découverte des `shader/*.txt`, moteur GPU créé à la demande, panneau Voxel Shader.
+  - `view_cube.rs` : View Cube (faces projetées avec la base caméra ; `view_cube_faces` sert aussi aux tests).
+  - `unsaved.rs` : dialogue modal « modifications non sauvegardées » (`request_open_path`, `handle_close_request` + `ViewportCommand::CancelClose`, `resolve_pending`). Utiliser `request_open_path` (pas `open_vox_path`) pour toute ouverture déclenchée par l'utilisateur.
+  - `backup.rs` : auto-backup toutes les `BACKUP_EVERY` (25) modifications dans `cache/backup.vox` ; `open_vox_path` (dialogue et glisser-déposer) réinitialise le compteur.
   - `tests.rs` : tests d'intégration **headless** (`Harness` : vraies frames egui + événements clavier/souris simulés, `MagicaVoxelApp::with_project` + `frame()`). `world_snapshot` (ignoré) rend un `.vox` en PNG : `VOX_IN=a.vox PNG_OUT=a.png cargo test -p mv-app world_snapshot -- --ignored`.
 - Conventions World Editor :
   - **Undo** : `finish_world_frame` compare `scene.structure()` en début/fin de frame et pousse un snapshot si changement (une étape par geste). Les opérations `world_*` n'enregistrent donc **jamais** l'undo elles-mêmes ; mettre `world.skip_record = true` pour un changement qui ne doit pas être annulable (undo/redo, ouverture de fichier).
@@ -147,7 +153,7 @@ Lorsque tu reprends le projet, voici les deux chantiers principaux décrits dans
    - Afficher les panneaux **Scene Outline** et **Layer Manager** à droite.
 
 ### Chantier B — Phase 7 : Animation, Voxel Shaders Externes & Ergonomie
-> Points 1 (timeline, hors keyframes de transformation) et 2 (shaders externes, format MagicaVoxel `shader/*.txt` plutôt que `// @arg`) faits. Prochain : point 3 (ergonomie).
+> Points 1 (timeline, hors keyframes de transformation), 2 (shaders externes, format MagicaVoxel `shader/*.txt` plutôt que `// @arg`) et 3 (View Cube, glisser-déposer, auto-backup) faits. Restent dans `ROADMAP.md` : améliorations du path tracer, imports/exports, raccourcis configurables.
 
 1. **Timeline d'Animation (`crates/mv-core` & `crates/mv-app`)** :
    - Stocker `frames: Vec<VoxelGrid>` et `active_frame: usize` par modèle.

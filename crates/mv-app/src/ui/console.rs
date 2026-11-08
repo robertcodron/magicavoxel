@@ -10,7 +10,7 @@ impl MagicaVoxelApp {
             .default_height(125.0)
             .show(ctx, |ui| {
                 ui.horizontal(|ui| {
-                    ui.strong("Console (TAB / F1)");
+                    ui.strong("Console (F1)");
                     ui.separator();
                     if let Some(hit) = self.hovered_hit {
                         let c = self

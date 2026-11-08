@@ -40,6 +40,9 @@ pub struct EditorProject {
     pub console_history: Vec<String>,
     pub console_logs: Vec<String>,
     pub dirty: bool,
+    /// Number of recorded modifications (voxel or World undo steps) since creation or
+    /// load. Drives the auto-backup.
+    pub edit_count: u64,
 }
 
 impl Default for EditorProject {
@@ -85,6 +88,7 @@ impl Default for EditorProject {
                     .to_string(),
             ],
             dirty: false,
+            edit_count: 0,
         }
     }
 }
@@ -104,6 +108,9 @@ impl EditorProject {
             world_undo: Vec::new(),
             world_redo: Vec::new(),
             selection: SelectionMask::new(d.x, d.y, d.z),
+            // Plain materials: the demo project's emissive/metal/glass presets must not
+            // leak into new projects or into files that do not override every key.
+            materials: Material::default_table(),
             ..Default::default()
         }
     }
@@ -251,6 +258,7 @@ impl EditorProject {
         self.world_undo.push(before);
         self.world_redo.clear();
         self.dirty = true;
+        self.edit_count += 1;
     }
 
     pub fn world_undo(&mut self) -> bool {
@@ -300,6 +308,7 @@ impl EditorProject {
         self.history
             .record(&self.grid, &self.palette, &self.materials);
         self.dirty = true;
+        self.edit_count += 1;
     }
 
     pub fn undo(&mut self) -> bool {
