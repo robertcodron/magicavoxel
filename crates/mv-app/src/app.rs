@@ -45,6 +45,10 @@ pub(crate) struct MagicaVoxelApp {
     pub(crate) pending_ui_scale: Option<f32>,
     /// Screen rectangle of the 3D viewport during the last frame.
     pub(crate) viewport_rect: egui::Rect,
+    pub(crate) anim_playing: bool,
+    pub(crate) anim_fps: f32,
+    /// `egui` time of the last playback step.
+    pub(crate) anim_last_step: f64,
 }
 
 impl MagicaVoxelApp {
@@ -92,6 +96,9 @@ impl MagicaVoxelApp {
             pending_tab: None,
             pending_ui_scale: None,
             viewport_rect: egui::Rect::NOTHING,
+            anim_playing: false,
+            anim_fps: 8.0,
+            anim_last_step: 0.0,
         }
     }
 
@@ -281,12 +288,14 @@ impl MagicaVoxelApp {
             (self.mode == ViewportMode::WorldEditor).then(|| self.project.scene.structure());
 
         self.handle_global_shortcuts(ctx);
+        self.tick_animation(ctx);
         if let Some(scale) = self.pending_ui_scale.take() {
             ctx.set_pixels_per_point(scale);
         }
         // Panel order matters in egui: top/bottom/side panels before the central viewport.
         self.show_top_bar(ctx);
         self.show_console_panel(ctx);
+        self.show_timeline(ctx);
         self.show_left_panel(ctx);
         self.show_right_panel(ctx);
         self.show_viewport(ctx);

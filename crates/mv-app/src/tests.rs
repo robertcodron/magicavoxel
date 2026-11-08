@@ -373,6 +373,84 @@ fn double_click_opens_shape_in_model_editor() {
     assert_eq!(h.app.project.active_model, model_b);
 }
 
+/// A project whose single shape has 3 frames of different sizes (2, 4, 6).
+fn animated_project() -> EditorProject {
+    let mut proj = EditorProject::new_empty(2, 2, 2);
+    proj.grid.full(3);
+    for size in [4, 6] {
+        proj.add_frame(true).unwrap();
+        proj.resize_canvas(size, size, size);
+        proj.grid.full(5);
+    }
+    proj.set_frame(0);
+    proj.world_undo.clear();
+    proj
+}
+
+#[test]
+fn timeline_playback_cycles_frames_in_model_editor() {
+    let mut h = Harness::new(animated_project());
+    assert_eq!(h.app.project.active_frame_count(), 3);
+    assert_eq!(h.app.project.grid.dimensions().x, 2);
+
+    // Undo history of frame 0 must survive playback.
+    h.app.project.record_undo();
+    h.app.project.grid.set(0, 0, 0, 9);
+
+    h.app.anim_fps = 10.0;
+    h.app.anim_playing = true;
+    let mut seen = std::collections::BTreeSet::new();
+    for _ in 0..40 {
+        h.step(); // 1/60 s per step: ~6 frames at 10 fps
+        seen.insert(h.app.project.active_frame_index());
+        let size = h.app.project.grid.dimensions().x;
+        assert_eq!(size as usize, 2 + 2 * h.app.project.active_frame_index());
+    }
+    assert_eq!(seen.len(), 3, "every frame shown while looping");
+    h.app.anim_playing = false;
+
+    h.app.goto_frame(0);
+    assert_eq!(h.app.project.grid.get(0, 0, 0), 9);
+    assert!(h.app.project.history.can_undo(), "per-model history kept");
+}
+
+#[test]
+fn world_editor_shows_current_frame() {
+    let mut h = Harness::new(animated_project());
+    h.key(Key::Tab);
+    let shape = h.app.project.active_shape.unwrap();
+    let size_at = |h: &Harness| {
+        let (lo, hi) = h.bounds(shape);
+        (hi - lo + IVec3::ONE).x
+    };
+    assert_eq!(size_at(&h), 2);
+    h.app.goto_frame(2);
+    h.step();
+    assert_eq!(size_at(&h), 6);
+
+    // Opening the shape in the Model Editor edits the model of the current frame.
+    h.click(h.screen_of(shape));
+    h.key(Key::Tab);
+    assert_eq!(h.app.mode, ViewportMode::ModelEditor);
+    assert_eq!(h.app.project.grid.dimensions().x, 6);
+    assert_eq!(h.app.project.active_frame_index(), 2);
+}
+
+#[test]
+fn deleting_a_frame_is_undoable_from_world_editor() {
+    let mut h = Harness::new(animated_project());
+    h.app.goto_frame(1);
+    assert!(h.app.project.delete_frame());
+    assert_eq!(h.app.project.active_frame_count(), 2);
+    h.key(Key::Tab);
+    h.key_with(Key::Z, ctrl());
+    assert_eq!(h.app.project.active_frame_count(), 3);
+    assert!(
+        h.app.project.scene.models.len() > h.app.project.active_model,
+        "edited model still exists"
+    );
+}
+
 /// Manual visual check: `VOX_IN=scene.vox PNG_OUT=out.png cargo test -p mv-app
 /// world_snapshot -- --ignored` renders the World Editor viewport of a file to a PNG.
 #[test]

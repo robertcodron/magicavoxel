@@ -8,7 +8,12 @@
 //! - `nSHP`: node id, attributes dict, model count, then (model id, dict) per model.
 //! - `LAYR`: layer id, attributes dict (`_name`, `_hidden`, `_color` "r g b"), reserved (-1).
 //!
-//! Only the first animation frame of transforms and shapes is kept for now.
+//! Animation: `nSHP` lists one model per keyframe (`_f` attribute); keys are expanded to
+//! one model per frame (holding the previous key). Extra `nTRN` frames are preserved
+//! verbatim in `SceneNode::extra_transform_keys` but not evaluated.
+
+/// Upper bound on the expanded length of a shape animation read from a file.
+const MAX_ANIMATION_FRAMES: u32 = 4096;
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 
@@ -34,7 +39,7 @@ pub(crate) fn write_models_and_scene(project: &EditorProject, out: &mut Vec<u8>)
     // Models referenced by at least one shape, in model-id order.
     let mut referenced: Vec<usize> = scene
         .nodes()
-        .filter_map(|(_, n)| n.model_id())
+        .flat_map(|(_, n)| n.frame_models().iter().copied())
         .filter(|&m| project.model(m).is_some())
         .collect::<std::collections::BTreeSet<_>>()
         .into_iter()
@@ -139,17 +144,24 @@ fn emit_node(
     trn.extend_from_slice(&(-1i32).to_le_bytes());
     let layer: i32 = if is_root { -1 } else { node.layer_id as i32 };
     trn.extend_from_slice(&layer.to_le_bytes());
-    trn.extend_from_slice(&1i32.to_le_bytes());
-    let mut frame = Vec::new();
-    let xf = node.transform;
-    if xf.rotation != Rotation::IDENTITY {
-        frame.push(("_r", xf.rotation.to_vox_byte().to_string()));
+    let animated = !node.extra_transform_keys.is_empty();
+    trn.extend_from_slice(&(1 + node.extra_transform_keys.len() as i32).to_le_bytes());
+    let frames =
+        std::iter::once((0u32, node.transform)).chain(node.extra_transform_keys.iter().copied());
+    for (f, xf) in frames {
+        let mut frame = Vec::new();
+        if xf.rotation != Rotation::IDENTITY {
+            frame.push(("_r", xf.rotation.to_vox_byte().to_string()));
+        }
+        if xf.translation != IVec3::ZERO {
+            let t = xf.translation;
+            frame.push(("_t", format!("{} {} {}", t.x, t.y, t.z)));
+        }
+        if animated {
+            frame.push(("_f", f.to_string()));
+        }
+        write_dict(&mut trn, &frame);
     }
-    if xf.translation != IVec3::ZERO {
-        let t = xf.translation;
-        frame.push(("_t", format!("{} {} {}", t.x, t.y, t.z)));
-    }
-    write_dict(&mut trn, &frame);
     write_chunk(out, b"nTRN", &trn, &[]);
 
     match &node.kind {
@@ -170,13 +182,19 @@ fn emit_node(
             write_chunk(out, b"nGRP", &grp, &[]);
             out.extend_from_slice(&body);
         }
-        NodeKind::Shape { model_id } => {
+        NodeKind::Shape { models } => {
             let mut shp = Vec::new();
             shp.extend_from_slice(&child_id.to_le_bytes());
             write_dict(&mut shp, &[]);
-            shp.extend_from_slice(&1i32.to_le_bytes());
-            shp.extend_from_slice(&remap[model_id].to_le_bytes());
-            write_dict(&mut shp, &[]);
+            shp.extend_from_slice(&(models.len() as i32).to_le_bytes());
+            for (f, m) in models.iter().enumerate() {
+                shp.extend_from_slice(&remap[m].to_le_bytes());
+                if models.len() > 1 {
+                    write_dict(&mut shp, &[("_f", f.to_string())]);
+                } else {
+                    write_dict(&mut shp, &[]);
+                }
+            }
             write_chunk(out, b"nSHP", &shp, &[]);
         }
     }
@@ -191,7 +209,7 @@ struct TrnChunk {
     attrs: Dict,
     child: i32,
     layer: i32,
-    frame: Dict,
+    frames: Vec<Dict>,
 }
 
 struct GrpChunk {
@@ -205,7 +223,8 @@ pub(crate) struct SceneReader {
     pending_size: Option<(u32, u32, u32)>,
     trns: HashMap<i32, TrnChunk>,
     grps: HashMap<i32, GrpChunk>,
-    shps: HashMap<i32, i32>,
+    /// Shape id -> `(frame, model)` keys.
+    shps: HashMap<i32, Vec<(u32, i32)>>,
     layers: BTreeMap<i32, Dict>,
 }
 
@@ -263,20 +282,21 @@ impl SceneReader {
         let (id, attrs, mut c) = read_id_and_dict(content)?;
         let child = read_i32_le(content, c)?;
         let layer = read_i32_le(content, c + 8)?;
-        let frames = read_i32_le(content, c + 12)?;
+        let count = read_i32_le(content, c + 12)?.clamp(0, MAX_ANIMATION_FRAMES as i32);
         c += 16;
-        let frame = if frames > 0 {
-            read_dict(content, c)?.0
-        } else {
-            Dict::new()
-        };
+        let mut frames = Vec::new();
+        for _ in 0..count {
+            let (dict, next) = read_dict(content, c)?;
+            frames.push(dict);
+            c = next;
+        }
         self.trns.insert(
             id,
             TrnChunk {
                 attrs,
                 child,
                 layer,
-                frame,
+                frames,
             },
         );
         Ok(())
@@ -293,11 +313,22 @@ impl SceneReader {
     }
 
     fn read_shp(&mut self, content: &[u8]) -> Result<(), FormatError> {
-        let (id, _attrs, c) = read_id_and_dict(content)?;
-        let n = read_i32_le(content, c)?;
-        if n > 0 {
-            // First model only (later ones are animation frames).
-            self.shps.insert(id, read_i32_le(content, c + 4)?);
+        let (id, _attrs, mut c) = read_id_and_dict(content)?;
+        let n = read_i32_le(content, c)?.clamp(0, MAX_ANIMATION_FRAMES as i32);
+        c += 4;
+        let mut keys = Vec::new();
+        for i in 0..n {
+            let model = read_i32_le(content, c)?;
+            let (dict, next) = read_dict(content, c + 4)?;
+            c = next;
+            let frame = dict
+                .get("_f")
+                .and_then(|s| s.trim().parse::<u32>().ok())
+                .unwrap_or(i as u32);
+            keys.push((frame, model));
+        }
+        if !keys.is_empty() {
+            self.shps.insert(id, keys);
         }
         Ok(())
     }
@@ -359,18 +390,12 @@ impl SceneReader {
                 self.build_node(&mut scene, root, root_id, true, 0, &mut visited);
             }
             None => {
-                // No scene graph (single-model or pre-0.99 file). Several models there are
-                // animation frames: keep frame 0 visible and the others as hidden shapes so
-                // they are preserved on save without overlapping on screen.
+                // No scene graph (single-model or pre-0.99 file): several models there are
+                // the frames of one animated object.
                 let root = scene.root();
-                for m in 0..model_count {
-                    if let Ok(id) = scene.add_shape(root, m, Transform::IDENTITY) {
-                        if m > 0 {
-                            if let Some(n) = scene.node_mut(id) {
-                                n.name = Some(format!("frame {m}"));
-                                n.hidden = true;
-                            }
-                        }
+                if let Ok(id) = scene.add_shape(root, 0, Transform::IDENTITY) {
+                    for m in 1..model_count {
+                        let _ = scene.insert_frame(id, m, m);
                     }
                 }
             }
@@ -395,7 +420,23 @@ impl SceneReader {
         let Some(trn) = self.trns.get(&trn_id) else {
             return;
         };
-        let transform = parse_transform(&trn.frame);
+        let transform = trn
+            .frames
+            .first()
+            .map_or(Transform::IDENTITY, parse_transform);
+        let extra_keys: Vec<(u32, Transform)> = trn
+            .frames
+            .iter()
+            .enumerate()
+            .skip(1)
+            .map(|(i, d)| {
+                let f = d
+                    .get("_f")
+                    .and_then(|s| s.trim().parse().ok())
+                    .unwrap_or(i as u32);
+                (f, parse_transform(d))
+            })
+            .collect();
 
         let node_id = if let Some(grp) = self.grps.get(&trn.child) {
             let id = if is_root {
@@ -414,15 +455,19 @@ impl SceneReader {
                 self.build_node(scene, id, c, false, depth + 1, visited);
             }
             id
-        } else if let Some(&model) = self.shps.get(&trn.child) {
-            let Ok(model) = usize::try_from(model) else {
+        } else if let Some(keys) = self.shps.get(&trn.child) {
+            let Some(models) = expand_model_keys(keys, scene.models.len()) else {
                 return;
             };
             // A root that is directly a shape still lives under the root group.
-            match scene.add_shape(parent, model, transform) {
+            let id = match scene.add_shape(parent, models[0], transform) {
                 Ok(id) => id,
                 Err(_) => return,
+            };
+            for (f, &m) in models.iter().enumerate().skip(1) {
+                let _ = scene.insert_frame(id, f, m);
             }
+            id
         } else {
             return;
         };
@@ -431,8 +476,32 @@ impl SceneReader {
             node.name = trn.attrs.get("_name").cloned();
             node.hidden = is_true(trn.attrs.get("_hidden"));
             node.layer_id = usize::try_from(trn.layer).unwrap_or(0);
+            node.extra_transform_keys = extra_keys;
         }
     }
+}
+
+/// Expand sparse `(frame, model)` keys into one model per frame (each key holds until
+/// the next one; frames before the first key use it). Invalid model ids are dropped.
+fn expand_model_keys(keys: &[(u32, i32)], model_count: usize) -> Option<Vec<usize>> {
+    let mut valid: Vec<(u32, usize)> = keys
+        .iter()
+        .filter_map(|&(f, m)| {
+            let m = usize::try_from(m).ok().filter(|&m| m < model_count)?;
+            Some((f.min(MAX_ANIMATION_FRAMES - 1), m))
+        })
+        .collect();
+    valid.sort_by_key(|&(f, _)| f);
+    let last = valid.last()?.0;
+    let mut out = Vec::with_capacity(last as usize + 1);
+    let mut k = 0;
+    for f in 0..=last {
+        while k + 1 < valid.len() && valid[k + 1].0 <= f {
+            k += 1;
+        }
+        out.push(valid[k].1);
+    }
+    Some(out)
 }
 
 fn parse_transform(frame: &Dict) -> Transform {

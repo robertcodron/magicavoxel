@@ -185,8 +185,14 @@ pub struct SceneLayer {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum NodeKind {
-    Group { children: Vec<NodeId> },
-    Shape { model_id: usize },
+    Group {
+        children: Vec<NodeId>,
+    },
+    /// `models[f]` is the model shown at animation frame `f` (never empty). A shape
+    /// with a single model is static; animated shapes loop over their own length.
+    Shape {
+        models: Vec<usize>,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -198,14 +204,30 @@ pub struct SceneNode {
     pub hidden: bool,
     pub parent: Option<NodeId>,
     pub kind: NodeKind,
+    /// Extra `nTRN` keyframes `(frame, transform)` read from a file, written back
+    /// unchanged. Transform animation is not evaluated yet: `transform` is used for
+    /// every frame.
+    pub extra_transform_keys: Vec<(u32, Transform)>,
 }
 
 impl SceneNode {
+    /// Model of frame 0 (see [`Scene::shape_model`] for the current frame).
     pub fn model_id(&self) -> Option<usize> {
-        match self.kind {
-            NodeKind::Shape { model_id } => Some(model_id),
-            NodeKind::Group { .. } => None,
+        self.frame_models().first().copied()
+    }
+
+    /// Models of every animation frame (empty for groups).
+    pub fn frame_models(&self) -> &[usize] {
+        match &self.kind {
+            NodeKind::Shape { models } => models,
+            NodeKind::Group { .. } => &[],
         }
+    }
+
+    /// Model shown at a global animation frame (shapes loop over their own length).
+    pub fn model_at_frame(&self, frame: u32) -> Option<usize> {
+        let models = self.frame_models();
+        (!models.is_empty()).then(|| models[frame as usize % models.len()])
     }
 
     pub fn children(&self) -> &[NodeId] {
@@ -264,6 +286,9 @@ pub struct Scene {
     nodes: BTreeMap<NodeId, SceneNode>,
     root: NodeId,
     next_id: NodeId,
+    /// Animation frame displayed and used by every geometric query. Not part of the
+    /// undoable [`SceneStructure`].
+    pub current_frame: u32,
 }
 
 impl Default for Scene {
@@ -287,6 +312,7 @@ impl Scene {
                 kind: NodeKind::Group {
                     children: Vec::new(),
                 },
+                extra_transform_keys: Vec::new(),
             },
         );
         Self {
@@ -295,6 +321,7 @@ impl Scene {
             nodes,
             root: 0,
             next_id: 1,
+            current_frame: 0,
         }
     }
 
@@ -379,6 +406,7 @@ impl Scene {
                 kind: NodeKind::Group {
                     children: Vec::new(),
                 },
+                extra_transform_keys: Vec::new(),
             },
         )
     }
@@ -400,7 +428,10 @@ impl Scene {
                 layer_id: 0,
                 hidden: false,
                 parent: None,
-                kind: NodeKind::Shape { model_id },
+                kind: NodeKind::Shape {
+                    models: vec![model_id],
+                },
+                extra_transform_keys: Vec::new(),
             },
         )
     }
@@ -479,10 +510,15 @@ impl Scene {
         true
     }
 
+    /// Model a shape shows at the current animation frame.
+    pub fn shape_model(&self, shape: NodeId) -> Option<usize> {
+        self.nodes.get(&shape)?.model_at_frame(self.current_frame)
+    }
+
     fn model_of(&self, shape: NodeId) -> Result<&VoxelGrid, SceneError> {
+        self.get(shape)?;
         let model_id = self
-            .get(shape)?
-            .model_id()
+            .shape_model(shape)
             .ok_or(SceneError::NotAShape(shape))?;
         self.models
             .get(model_id)
@@ -553,24 +589,70 @@ impl Scene {
         Ok(())
     }
 
-    /// Number of shapes referencing `model_id`.
+    /// Number of shapes referencing `model_id` (in any frame).
     pub fn model_ref_count(&self, model_id: usize) -> usize {
         self.nodes
             .values()
-            .filter(|n| n.model_id() == Some(model_id))
+            .filter(|n| n.frame_models().contains(&model_id))
             .count()
     }
 
-    /// New shape referencing the same model, same parent and transform (*Reference*).
+    /// New shape referencing the same models, same parent and transform (*Reference*).
     pub fn instantiate(&mut self, shape: NodeId) -> Result<NodeId, SceneError> {
         let node = self.get(shape)?.clone();
         let model_id = node.model_id().ok_or(SceneError::NotAShape(shape))?;
         let parent = node.parent.unwrap_or(self.root);
         let id = self.add_shape(parent, model_id, node.transform)?;
         let new = self.get_mut(id)?;
+        new.kind = node.kind;
         new.layer_id = node.layer_id;
         new.name = node.name;
+        new.extra_transform_keys = node.extra_transform_keys;
         Ok(id)
+    }
+
+    /// Longest shape animation in the scene (at least 1 frame).
+    pub fn animation_length(&self) -> u32 {
+        self.nodes
+            .values()
+            .map(|n| n.frame_models().len() as u32)
+            .max()
+            .unwrap_or(1)
+            .max(1)
+    }
+
+    fn shape_models_mut(&mut self, shape: NodeId) -> Result<&mut Vec<usize>, SceneError> {
+        match &mut self.get_mut(shape)?.kind {
+            NodeKind::Shape { models } => Ok(models),
+            NodeKind::Group { .. } => Err(SceneError::NotAShape(shape)),
+        }
+    }
+
+    /// Insert `model_id` as frame `index` of a shape (later frames shift by one).
+    pub fn insert_frame(
+        &mut self,
+        shape: NodeId,
+        index: usize,
+        model_id: usize,
+    ) -> Result<(), SceneError> {
+        if model_id >= self.models.len() {
+            return Err(SceneError::UnknownModel(model_id));
+        }
+        let models = self.shape_models_mut(shape)?;
+        let index = index.min(models.len());
+        models.insert(index, model_id);
+        Ok(())
+    }
+
+    /// Remove frame `index` of a shape. The last remaining frame cannot be removed.
+    /// Returns whether a frame was removed. Models are kept (see `compact_models`).
+    pub fn remove_frame(&mut self, shape: NodeId, index: usize) -> Result<bool, SceneError> {
+        let models = self.shape_models_mut(shape)?;
+        if models.len() <= 1 || index >= models.len() {
+            return Ok(false);
+        }
+        models.remove(index);
+        Ok(true)
     }
 
     /// New shape with its own copy of the model (*Duplicate*).
@@ -580,19 +662,30 @@ impl Scene {
         Ok(id)
     }
 
-    /// `Ctrl+T`: give a shape its own copy of a model shared with other shapes.
-    /// Returns `true` if a copy was made.
+    /// `Ctrl+T`: give a shape its own copies of the models it shares with other
+    /// shapes (every animation frame). Returns `true` if a copy was made.
     pub fn convert_reference_to_duplicate(&mut self, shape: NodeId) -> Result<bool, SceneError> {
-        let model_id = self
-            .get(shape)?
-            .model_id()
-            .ok_or(SceneError::NotAShape(shape))?;
-        if self.model_ref_count(model_id) <= 1 {
+        let models = self.shape_models_mut(shape)?.clone();
+        let mut copies: BTreeMap<usize, usize> = BTreeMap::new();
+        for &m in &models {
+            if !copies.contains_key(&m) && self.model_ref_count(m) > 1 {
+                let grid = self
+                    .models
+                    .get(m)
+                    .ok_or(SceneError::UnknownModel(m))?
+                    .clone();
+                let new_id = self.add_model(grid);
+                copies.insert(m, new_id);
+            }
+        }
+        if copies.is_empty() {
             return Ok(false);
         }
-        let copy = self.model_of(shape)?.clone();
-        let new_id = self.add_model(copy);
-        self.get_mut(shape)?.kind = NodeKind::Shape { model_id: new_id };
+        for m in self.shape_models_mut(shape)?.iter_mut() {
+            if let Some(&c) = copies.get(m) {
+                *m = c;
+            }
+        }
         Ok(true)
     }
 
@@ -769,7 +862,7 @@ impl Scene {
     pub fn compact_models(&mut self) -> BTreeMap<usize, usize> {
         let mut used: Vec<bool> = vec![false; self.models.len()];
         for n in self.nodes.values() {
-            if let Some(m) = n.model_id() {
+            for &m in n.frame_models() {
                 if let Some(u) = used.get_mut(m) {
                     *u = true;
                 }
@@ -784,8 +877,10 @@ impl Scene {
             }
         }
         for n in self.nodes.values_mut() {
-            if let NodeKind::Shape { model_id } = &mut n.kind {
-                *model_id = remap[model_id];
+            if let NodeKind::Shape { models } = &mut n.kind {
+                for m in models.iter_mut() {
+                    *m = remap[m];
+                }
             }
         }
         remap
@@ -1039,5 +1134,44 @@ mod tests {
             let v = IVec3::new(3, -5, 7);
             assert_eq!(r.apply_f32(v.as_vec3()), r.apply(v).as_vec3());
         }
+    }
+
+    #[test]
+    fn animated_shape_frames_follow_current_frame() {
+        let mut scene = Scene::new();
+        let small = scene.add_model(cube(2, 1));
+        let big = scene.add_model(cube(4, 2));
+        let root = scene.root();
+        let s = scene.add_shape(root, small, Transform::IDENTITY).unwrap();
+        scene.insert_frame(s, 1, big).unwrap();
+        let other = scene.add_shape(root, small, Transform::IDENTITY).unwrap();
+        assert_eq!(scene.animation_length(), 2);
+
+        scene.current_frame = 1;
+        assert_eq!(scene.shape_model(s), Some(big));
+        assert_eq!(
+            scene.shape_model(other),
+            Some(small),
+            "static shape on every frame"
+        );
+        let (lo, hi) = scene.world_bounds(s).unwrap();
+        assert_eq!(hi - lo + IVec3::ONE, IVec3::splat(4));
+        scene.current_frame = 2; // loops
+        assert_eq!(scene.shape_model(s), Some(small));
+
+        // Instances share every frame; Ctrl+T copies each shared frame model.
+        let inst = scene.instantiate(s).unwrap();
+        assert_eq!(scene.node(inst).unwrap().frame_models(), &[small, big]);
+        assert!(scene.convert_reference_to_duplicate(inst).unwrap());
+        let copied = scene.node(inst).unwrap().frame_models().to_vec();
+        assert_eq!(copied.len(), 2);
+        assert!(!copied.contains(&small) && !copied.contains(&big));
+
+        assert!(scene.remove_frame(s, 0).unwrap());
+        assert_eq!(scene.node(s).unwrap().frame_models(), &[big]);
+        assert!(
+            !scene.remove_frame(s, 0).unwrap(),
+            "keeps at least one frame"
+        );
     }
 }

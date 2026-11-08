@@ -22,13 +22,17 @@ fn node_label(scene: &Scene, id: NodeId) -> String {
     };
     let kind = match &n.kind {
         NodeKind::Group { children } => format!("📁 Group ({})", children.len()),
-        NodeKind::Shape { model_id } => {
-            let refs = scene.model_ref_count(*model_id);
-            if refs > 1 {
-                format!("🧊 Model #{model_id} (ref ×{refs})")
-            } else {
-                format!("🧊 Model #{model_id}")
+        NodeKind::Shape { models } => {
+            let model_id = scene.shape_model(id).unwrap_or(models[0]);
+            let refs = scene.model_ref_count(model_id);
+            let mut label = format!("🧊 Model #{model_id}");
+            if models.len() > 1 {
+                label += &format!(" 🎞{}", models.len());
             }
+            if refs > 1 {
+                label += &format!(" (ref ×{refs})");
+            }
+            label
         }
     };
     match &n.name {

@@ -70,6 +70,7 @@ impl MagicaVoxelApp {
 
     pub(crate) fn reset_world_state(&mut self) {
         self.world = WorldEditorState::new(self.project.scene.root());
+        self.anim_playing = false;
     }
 
     /// Drop references to nodes that no longer exist (after undo, delete, union...).
@@ -117,10 +118,7 @@ impl MagicaVoxelApp {
 
     /// Open a shape's model in the Model Editor.
     pub(crate) fn edit_shape_in_model_editor(&mut self, shape: NodeId) {
-        let Some(model) = self.project.scene.node(shape).and_then(|n| n.model_id()) else {
-            return;
-        };
-        if self.project.set_active_model(model) {
+        if self.project.open_shape(shape) {
             self.mode = ViewportMode::ModelEditor;
             self.camera.recenter(&self.project.grid);
             self.sync_size_input();
@@ -377,6 +375,9 @@ impl MagicaVoxelApp {
         if ok {
             self.world.skip_record = true;
             self.sanitize_world_state();
+            // Frames may have been added/removed: keep editing a model that exists.
+            self.project.refresh_active_model();
+            self.sync_size_input();
         }
     }
 
@@ -541,8 +542,7 @@ impl MagicaVoxelApp {
                     let model = self
                         .project
                         .scene
-                        .node(h.node)
-                        .and_then(|n| n.model_id())
+                        .shape_model(h.node)
                         .and_then(|m| self.project.model(m));
                     if let Some(c) = model.map(|g| g.get_i32(h.voxel.x, h.voxel.y, h.voxel.z)) {
                         if c != 0 {

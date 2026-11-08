@@ -103,7 +103,11 @@ mod tests {
     fn test_grid_revision_tracks_mutations() {
         let mut grid = VoxelGrid::new(8, 8, 8);
         let r0 = grid.revision();
-        assert_eq!(grid.clone().revision(), r0, "clone keeps identical content id");
+        assert_eq!(
+            grid.clone().revision(),
+            r0,
+            "clone keeps identical content id"
+        );
 
         grid.set(1, 1, 1, 3);
         let r1 = grid.revision();
@@ -146,10 +150,18 @@ mod tests {
         proj.grid.set(1, 1, 1, 9);
         assert!(proj.set_active_model(other));
         assert_eq!(proj.grid.dimensions().to_array(), [2, 2, 2]);
-        assert_eq!(proj.model(0).unwrap().get(1, 1, 1), 9, "edit committed to scene");
+        assert_eq!(
+            proj.model(0).unwrap().get(1, 1, 1),
+            9,
+            "edit committed to scene"
+        );
 
         proj.grid.set(0, 0, 0, 3);
-        assert_eq!(proj.model(other).unwrap().get(0, 0, 0), 3, "live view of active model");
+        assert_eq!(
+            proj.model(other).unwrap().get(0, 0, 0),
+            3,
+            "live view of active model"
+        );
         assert!(proj.set_active_model(0));
         assert_eq!(proj.grid.get(1, 1, 1), 9);
         assert!(!proj.set_active_model(42));
@@ -160,7 +172,11 @@ mod tests {
         let mut proj = EditorProject::new_empty(4, 4, 4);
         let root = proj.scene.root();
         let shape = proj.add_new_object(root, 10, 10, 6).unwrap();
-        assert_eq!(proj.scene.world_bounds(shape).unwrap().0.z, 0, "rests on ground");
+        assert_eq!(
+            proj.scene.world_bounds(shape).unwrap().0.z,
+            0,
+            "rests on ground"
+        );
         assert_eq!(proj.scene.shapes_under(root).len(), 2);
 
         proj.grid.set(1, 1, 1, 4); // Model Editor edit after the world op
@@ -170,5 +186,59 @@ mod tests {
         assert!(proj.world_redo());
         assert_eq!(proj.scene.shapes_under(root).len(), 2);
         assert!(!proj.world_redo());
+    }
+
+    #[test]
+    fn test_animation_frames_and_per_model_undo() {
+        let mut proj = EditorProject::new_empty(4, 4, 4);
+        assert_eq!(proj.active_frame_count(), 1);
+
+        proj.record_undo();
+        proj.grid.set(0, 0, 0, 1);
+        // `+` duplicates frame 0 into frame 1 and switches to it.
+        assert_eq!(proj.add_frame(false), Some(1));
+        assert_eq!(proj.active_frame_count(), 2);
+        assert_eq!(proj.grid.get(0, 0, 0), 1, "copy of the previous frame");
+        assert!(!proj.history.can_undo(), "new model, fresh history");
+        proj.grid.set(3, 3, 3, 2);
+
+        // Back to frame 0: its edit and its undo history are still there.
+        proj.set_frame(0);
+        assert_eq!(proj.grid.get(3, 3, 3), 0);
+        assert!(proj.history.can_undo(), "frame 0 history restored");
+        proj.set_frame(1);
+        assert_eq!(proj.grid.get(3, 3, 3), 2, "frame 1 edit committed");
+
+        // Empty frame, then delete it.
+        assert_eq!(proj.add_frame(true), Some(2));
+        assert_eq!(proj.grid.count_solid(), 0);
+        assert!(proj.delete_frame());
+        assert_eq!(proj.active_frame_count(), 2);
+        assert_eq!(proj.active_frame_index(), 1);
+
+        // Frame structure changes are World undo steps.
+        assert!(proj.world_undo()); // undo delete
+        assert_eq!(proj.active_frame_count(), 3);
+    }
+
+    #[test]
+    fn test_xs_generates_animation_frames() {
+        let mut proj = EditorProject::new_empty(16, 16, 16);
+        proj.palette.selected = 4;
+        proj.run_command("xs -n 3 -cur sphere 5").unwrap();
+        assert_eq!(proj.active_frame_count(), 4, "frame 0 + 3 generated frames");
+        assert_eq!(proj.active_frame_index(), 3);
+        assert!(proj.grid.count_solid() > 0);
+        assert_eq!(
+            proj.world_undo.len(),
+            1,
+            "one undo step for the whole batch"
+        );
+
+        proj.run_command("xs -n 2 -prev life").unwrap();
+        assert_eq!(proj.active_frame_count(), 6);
+
+        assert!(proj.run_command("xs -n 2 -cur not_a_shader").is_err());
+        assert_eq!(proj.active_frame_count(), 6, "unknown shader adds no frame");
     }
 }

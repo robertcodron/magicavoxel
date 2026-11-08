@@ -1,3 +1,5 @@
+use std::collections::HashMap;
+
 use glam::IVec3;
 
 use crate::brush::BrushSettings;
@@ -21,6 +23,11 @@ pub struct EditorProject {
     /// World Editor scene graph (all models, nodes, layers).
     pub scene: Scene,
     pub active_model: usize,
+    /// Shape whose animation frames the Model Editor timeline navigates (the shape that
+    /// was opened from the World Editor). `None` if it was deleted.
+    pub active_shape: Option<NodeId>,
+    /// Undo histories of the models that are not active (restored on switch).
+    pub model_histories: HashMap<usize, History>,
     /// World Editor undo/redo: scene structure only (never voxel content).
     pub world_undo: Vec<SceneStructure>,
     pub world_redo: Vec<SceneStructure>,
@@ -55,10 +62,14 @@ impl Default for EditorProject {
         materials[79].ior = 1.52;
         materials[79].alpha = 0.35;
 
+        let scene = Scene::single(grid.clone());
+        let active_shape = scene.shapes_under(scene.root()).first().copied();
         Self {
             name: "monu_rust".to_string(),
-            scene: Scene::single(grid.clone()),
+            scene,
             active_model: 0,
+            active_shape,
+            model_histories: HashMap::new(),
             world_undo: Vec::new(),
             world_redo: Vec::new(),
             grid,
@@ -70,7 +81,7 @@ impl Default for EditorProject {
             history: History::default(),
             console_history: Vec::new(),
             console_logs: vec![
-                "MagicaVoxel Rust Edition ready. Press TAB or F1 to focus console, type 'help' for commands."
+                "MagicaVoxel Rust Edition ready. Press F1 to focus the console, type 'help' for commands. TAB switches Model / World editors."
                     .to_string(),
             ],
             dirty: false,
@@ -82,10 +93,13 @@ impl EditorProject {
     pub fn new_empty(size_x: u32, size_y: u32, size_z: u32) -> Self {
         let grid = VoxelGrid::new(size_x, size_y, size_z);
         let d = grid.dimensions();
+        let scene = Scene::single(grid.clone());
+        let active_shape = scene.shapes_under(scene.root()).first().copied();
         Self {
             name: "untitled".to_string(),
-            scene: Scene::single(grid.clone()),
+            scene,
             active_model: 0,
+            active_shape,
             grid,
             world_undo: Vec::new(),
             world_redo: Vec::new(),
@@ -122,11 +136,105 @@ impl EditorProject {
             return true;
         }
         self.commit_active_model();
+        let previous = std::mem::take(&mut self.history);
+        self.model_histories.insert(self.active_model, previous);
         self.active_model = model_id;
         self.grid = self.scene.models[model_id].clone();
         let d = self.grid.dimensions();
         self.selection = SelectionMask::new(d.x, d.y, d.z);
-        self.history = History::default();
+        self.history = self.model_histories.remove(&model_id).unwrap_or_default();
+        true
+    }
+
+    /// Edit `shape` in the Model Editor at the current animation frame.
+    pub fn open_shape(&mut self, shape: NodeId) -> bool {
+        match self.scene.shape_model(shape) {
+            Some(model) if self.set_active_model(model) => {
+                self.active_shape = Some(shape);
+                true
+            }
+            _ => false,
+        }
+    }
+
+    /// Re-point the edited model at the active shape's model for the current frame
+    /// (after a frame change or a World undo). Clears `active_shape` if it is gone.
+    pub fn refresh_active_model(&mut self) {
+        if let Some(shape) = self.active_shape {
+            match self.scene.shape_model(shape) {
+                Some(model) => {
+                    self.set_active_model(model);
+                }
+                None => self.active_shape = None,
+            }
+        }
+    }
+
+    /// Animation frames of the active shape (1 if there is none).
+    pub fn active_frame_count(&self) -> usize {
+        self.active_shape
+            .and_then(|s| self.scene.node(s))
+            .map_or(1, |n| n.frame_models().len().max(1))
+    }
+
+    /// Index of the current frame within the active shape's animation.
+    pub fn active_frame_index(&self) -> usize {
+        self.scene.current_frame as usize % self.active_frame_count()
+    }
+
+    /// Show animation frame `frame` everywhere and edit the active shape's model for it.
+    pub fn set_frame(&mut self, frame: u32) {
+        self.scene.current_frame = frame;
+        self.refresh_active_model();
+    }
+
+    /// Timeline `+`: insert a frame after the current one in the active shape, as a copy
+    /// of the current frame (`empty` = blank model of the same size). Records a World
+    /// undo step. Returns the new frame index.
+    pub fn add_frame(&mut self, empty: bool) -> Option<usize> {
+        self.scene.node(self.active_shape?)?;
+        self.record_world_undo();
+        let index = self.add_frame_unrecorded(empty);
+        if index.is_none() {
+            self.world_undo.pop();
+        }
+        index
+    }
+
+    /// [`EditorProject::add_frame`] without the undo step (for batch generation).
+    pub fn add_frame_unrecorded(&mut self, empty: bool) -> Option<usize> {
+        let shape = self.active_shape?;
+        self.scene.node(shape)?;
+        let index = self.active_frame_index() + 1;
+        let d = self.grid.dimensions();
+        let grid = if empty {
+            VoxelGrid::new(d.x, d.y, d.z)
+        } else {
+            self.grid.clone()
+        };
+        let model = self.scene.add_model(grid);
+        self.scene.insert_frame(shape, index, model).ok()?;
+        self.set_frame(index as u32);
+        Some(index)
+    }
+
+    /// Timeline `-`: delete the current frame of the active shape (keeps at least one).
+    /// Records a World undo step. Returns whether a frame was removed.
+    pub fn delete_frame(&mut self) -> bool {
+        let Some(shape) = self.active_shape else {
+            return false;
+        };
+        if self.active_frame_count() <= 1 {
+            return false;
+        }
+        let index = self.active_frame_index();
+        self.record_world_undo();
+        if self.scene.remove_frame(shape, index) != Ok(true) {
+            self.world_undo.pop();
+            return false;
+        }
+        let count = self.active_frame_count();
+        self.set_frame(index.min(count - 1) as u32);
         true
     }
 
@@ -189,12 +297,15 @@ impl EditorProject {
     }
 
     pub fn record_undo(&mut self) {
-        self.history.record(&self.grid, &self.palette, &self.materials);
+        self.history
+            .record(&self.grid, &self.palette, &self.materials);
         self.dirty = true;
     }
 
     pub fn undo(&mut self) -> bool {
-        let ok = self.history.undo(&mut self.grid, &mut self.palette, &mut self.materials);
+        let ok = self
+            .history
+            .undo(&mut self.grid, &mut self.palette, &mut self.materials);
         if ok {
             let d = self.grid.dimensions();
             self.selection.resize(d.x, d.y, d.z);
@@ -203,7 +314,9 @@ impl EditorProject {
     }
 
     pub fn redo(&mut self) -> bool {
-        let ok = self.history.redo(&mut self.grid, &mut self.palette, &mut self.materials);
+        let ok = self
+            .history
+            .redo(&mut self.grid, &mut self.palette, &mut self.materials);
         if ok {
             let d = self.grid.dimensions();
             self.selection.resize(d.x, d.y, d.z);
@@ -298,11 +411,11 @@ impl EditorProject {
                     .push(format!("> {} : Export requested ({})", trimmed, format));
             }
             Err(err) => {
-                self.console_logs.push(format!("> {} : [ERR] {}", trimmed, err));
+                self.console_logs
+                    .push(format!("> {} : [ERR] {}", trimmed, err));
             }
             _ => {}
         }
         res
     }
 }
-

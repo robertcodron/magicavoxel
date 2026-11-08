@@ -10,9 +10,14 @@ fn print_node(scene: &Scene, id: usize, depth: usize) {
     let t = n.transform.translation;
     let kind = match &n.kind {
         NodeKind::Group { children } => format!("group ({} children)", children.len()),
-        NodeKind::Shape { model_id } => {
-            let d = scene.models[*model_id].dimensions();
-            format!("shape model #{model_id} {}x{}x{}", d.x, d.y, d.z)
+        NodeKind::Shape { models } => {
+            let d = scene.models[models[0]].dimensions();
+            let anim = if models.len() > 1 {
+                format!(" ({} frames)", models.len())
+            } else {
+                String::new()
+            };
+            format!("shape model #{} {}x{}x{}{anim}", models[0], d.x, d.y, d.z)
         }
     };
     println!(
@@ -78,8 +83,13 @@ fn main() {
                 scene.world_transform(a) == again.scene.world_transform(b)
                     && scene.is_visible(a) == again.scene.is_visible(b)
                     && na.name == nb.name
-                    && scene.models[na.model_id().unwrap()]
-                        == again.scene.models[nb.model_id().unwrap()]
+                    && na.extra_transform_keys == nb.extra_transform_keys
+                    && na.frame_models().len() == nb.frame_models().len()
+                    && na
+                        .frame_models()
+                        .iter()
+                        .zip(nb.frame_models())
+                        .all(|(&ma, &mb)| scene.models[ma] == again.scene.models[mb])
             })
             && again.palette.colors == project.palette.colors
             && again.materials == project.materials;

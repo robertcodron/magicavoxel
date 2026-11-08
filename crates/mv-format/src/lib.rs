@@ -113,17 +113,17 @@ pub fn from_vox_bytes(bytes: &[u8]) -> Result<EditorProject, FormatError> {
         .ok_or_else(|| FormatError::InvalidVox("No model (SIZE/XYZI) found".to_string()))?;
     // Edit the first visible shape's model by default (else the first model).
     let root = scene.root();
-    let active = scene
+    let active_shape = scene
         .shapes_under(root)
         .into_iter()
         .find(|&s| scene.is_visible(s))
-        .or_else(|| scene.shapes_under(root).into_iter().next())
-        .and_then(|s| scene.node(s).and_then(|n| n.model_id()))
-        .unwrap_or(0);
+        .or_else(|| scene.shapes_under(root).into_iter().next());
+    let active = active_shape.and_then(|s| scene.shape_model(s)).unwrap_or(0);
     project.grid = scene.models[active].clone();
     let d = project.grid.dimensions();
     project.selection.resize(d.x, d.y, d.z);
     project.active_model = active;
+    project.active_shape = active_shape;
     project.scene = scene;
 
     Ok(project)
@@ -149,7 +149,10 @@ pub fn load_vox_file(path: impl AsRef<Path>) -> Result<EditorProject, FormatErro
 }
 
 /// Export `VoxelGrid` to Wavefront `.obj` using 2D Greedy Meshing per slice to minimize quad count
-pub fn export_obj_greedy(project: &EditorProject, path: impl AsRef<Path>) -> Result<usize, FormatError> {
+pub fn export_obj_greedy(
+    project: &EditorProject,
+    path: impl AsRef<Path>,
+) -> Result<usize, FormatError> {
     let grid = &project.grid;
     let file = File::create(path)?;
     let mut w = BufWriter::new(file);
@@ -303,7 +306,10 @@ pub fn export_obj_greedy(project: &EditorProject, path: impl AsRef<Path>) -> Res
 }
 
 /// Export voxel point cloud to Stanford `.ply` format (`o ply`)
-pub fn export_ply_point_cloud(project: &EditorProject, path: impl AsRef<Path>) -> Result<usize, FormatError> {
+pub fn export_ply_point_cloud(
+    project: &EditorProject,
+    path: impl AsRef<Path>,
+) -> Result<usize, FormatError> {
     let grid = &project.grid;
     let mut points = Vec::new();
     for z in 0..grid.size_z() {
@@ -338,7 +344,10 @@ pub fn export_ply_point_cloud(project: &EditorProject, path: impl AsRef<Path>) -
 }
 
 /// Export volume as a 2D slice strip PNG of size `(size_x, size_y * size_z)` (`o slice`)
-pub fn export_slice_png(project: &EditorProject, path: impl AsRef<Path>) -> Result<(), FormatError> {
+pub fn export_slice_png(
+    project: &EditorProject,
+    path: impl AsRef<Path>,
+) -> Result<(), FormatError> {
     let grid = &project.grid;
     let width = grid.size_x();
     let height = grid.size_y() * grid.size_z();
@@ -585,7 +594,9 @@ mod tests {
             )
             .unwrap();
         let s2 = proj.scene.instantiate(s1).unwrap();
-        proj.scene.translate_world(s2, IVec3::new(10, 0, 0)).unwrap();
+        proj.scene
+            .translate_world(s2, IVec3::new(10, 0, 0))
+            .unwrap();
         {
             let n = proj.scene.node_mut(s2).unwrap();
             n.name = Some("tree copy".to_string());
@@ -624,7 +635,9 @@ mod tests {
         assert!(sc.layers[3].hidden);
         assert_eq!(sc.layers[3].color, [10, 200, 30]);
         assert!(matches!(
-            sc.node(sc.node(shapes[1]).unwrap().parent.unwrap()).unwrap().kind,
+            sc.node(sc.node(shapes[1]).unwrap().parent.unwrap())
+                .unwrap()
+                .kind,
             NodeKind::Group { .. }
         ));
     }
@@ -642,7 +655,13 @@ mod tests {
         v.iter().flat_map(|i| i.to_le_bytes()).collect()
     }
 
-    fn trn(id: i32, attrs: &[(&str, &str)], child: i32, layer: i32, frame: &[(&str, &str)]) -> Vec<u8> {
+    fn trn(
+        id: i32,
+        attrs: &[(&str, &str)],
+        child: i32,
+        layer: i32,
+        frame: &[(&str, &str)],
+    ) -> Vec<u8> {
         let mut c = ints(&[id]);
         c.extend(dict(attrs));
         c.extend(ints(&[child, -1, layer, 1]));
@@ -671,9 +690,25 @@ mod tests {
         let shp3 = shp(3, 0);
         let shp5 = shp(5, 1);
         write_chunk(&mut body, b"nSHP", &shp5, &[]);
-        write_chunk(&mut body, b"nTRN", &trn(4, &[("_name", "pole")], 5, 1, &[("_r", "17"), ("_t", "8 0 2")]), &[]);
+        write_chunk(
+            &mut body,
+            b"nTRN",
+            &trn(
+                4,
+                &[("_name", "pole")],
+                5,
+                1,
+                &[("_r", "17"), ("_t", "8 0 2")],
+            ),
+            &[],
+        );
         write_chunk(&mut body, b"nSHP", &shp3, &[]);
-        write_chunk(&mut body, b"nTRN", &trn(2, &[], 3, 0, &[("_t", "0 0 1")]), &[]);
+        write_chunk(
+            &mut body,
+            b"nTRN",
+            &trn(2, &[], 3, 0, &[("_t", "0 0 1")]),
+            &[],
+        );
         let mut grp = ints(&[1]);
         grp.extend(dict(&[]));
         grp.extend(ints(&[2, 2, 4]));
@@ -727,5 +762,64 @@ mod tests {
 
         let proj = from_vox_bytes(&file).expect("decode");
         assert_eq!(proj.scene.node_count(), 1);
+    }
+
+    #[test]
+    fn test_vox_animation_roundtrip() {
+        let mut proj = EditorProject::new_empty(3, 3, 3);
+        proj.grid.set(0, 0, 0, 1);
+        proj.add_frame(false).unwrap();
+        proj.grid.set(1, 1, 1, 2);
+        proj.add_frame(true).unwrap();
+        proj.grid.set(2, 2, 2, 3);
+        let shape = proj.active_shape.unwrap();
+        proj.scene.node_mut(shape).unwrap().extra_transform_keys =
+            vec![(10, Transform::from_translation(IVec3::new(4, 5, 6)))];
+
+        let decoded = from_vox_bytes(&to_vox_bytes(&proj)).expect("decode");
+        let sc = &decoded.scene;
+        let s = decoded.active_shape.expect("active shape");
+        let frames = sc.node(s).unwrap().frame_models().to_vec();
+        assert_eq!(frames.len(), 3);
+        assert_eq!(sc.models[frames[0]].count_solid(), 1);
+        assert_eq!(sc.models[frames[1]].get(1, 1, 1), 2);
+        assert_eq!(sc.models[frames[1]].get(0, 0, 0), 1);
+        assert_eq!(sc.models[frames[2]].count_solid(), 1);
+        assert_eq!(sc.models[frames[2]].get(2, 2, 2), 3);
+        assert_eq!(
+            sc.node(s).unwrap().extra_transform_keys,
+            vec![(10, Transform::from_translation(IVec3::new(4, 5, 6)))]
+        );
+    }
+
+    #[test]
+    fn test_vox_sparse_model_keys_hold_until_next_key() {
+        let mut body = Vec::new();
+        for c in [1u8, 2] {
+            write_chunk(&mut body, b"SIZE", &ints(&[1, 1, 1]), &[]);
+            let mut x = ints(&[1]);
+            x.extend_from_slice(&[0, 0, 0, c]);
+            write_chunk(&mut body, b"XYZI", &x, &[]);
+        }
+        write_chunk(&mut body, b"nTRN", &trn(0, &[], 1, -1, &[]), &[]);
+        let mut grp = ints(&[1]);
+        grp.extend(dict(&[]));
+        grp.extend(ints(&[1, 2]));
+        write_chunk(&mut body, b"nGRP", &grp, &[]);
+        write_chunk(&mut body, b"nTRN", &trn(2, &[], 3, 0, &[]), &[]);
+        let mut shp = ints(&[3]);
+        shp.extend(dict(&[]));
+        shp.extend(ints(&[2, 0]));
+        shp.extend(dict(&[("_f", "0")]));
+        shp.extend(ints(&[1]));
+        shp.extend(dict(&[("_f", "3")]));
+        write_chunk(&mut body, b"nSHP", &shp, &[]);
+        let mut file = b"VOX ".to_vec();
+        file.extend(ints(&[150]));
+        write_chunk(&mut file, b"MAIN", &[], &body);
+
+        let proj = from_vox_bytes(&file).expect("decode");
+        let s = proj.active_shape.unwrap();
+        assert_eq!(proj.scene.node(s).unwrap().frame_models(), &[0, 0, 0, 1]);
     }
 }

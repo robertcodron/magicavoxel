@@ -79,8 +79,7 @@ impl<'a> WorldView<'a> {
                 continue;
             }
             let Some(grid) = scene
-                .node(shape)
-                .and_then(|n| n.model_id())
+                .shape_model(shape)
                 .and_then(|m| project.model(m))
             else {
                 continue;

@@ -10,7 +10,7 @@
 | **Phase 4** | Moteur de Commandes Console (`docs/mv_commands.html`) & Voxel Shaders intégrés (`xs`) | ✅ Terminé | 100 % |
 | **Phase 6** | *Renderer* : Path Tracer GPU (`wgpu` / WGSL), Matériaux PBR (Metal, Glass, Emit, Cloud), DOF & ACES | ✅ Terminé | 90 % |
 | **Phase 5** | *World Editor* : Graphe de scène multi-objets (`nTRN`, `nGRP`, `nSHP`), Instances, Calques (`LAYR`), Gizmos & Booléens | 🚧 En cours | 80 % |
-| **Phase 7** | Timeline d'Animation (`0..360`), Shaders GLSL/WGSL externes (`shaders/`), OIDN Denoiser, Marching Cubes & UI avancée | ⏳ À faire | 0 % |
+| **Phase 7** | Timeline d'Animation (`0..360`), Shaders GLSL/WGSL externes (`shaders/`), OIDN Denoiser, Marching Cubes & UI avancée | 🚧 En cours | 15 % |
 
 ---
 
@@ -85,9 +85,15 @@
 
 ### ⏳ Phase 7 : Animation, Voxel Shaders GLSL/WGSL Externes & Finitions Avancées
 **Objectif :** Compléter les fonctionnalités de production (animation, shaders personnalisés, débruitage IA, imports/exports additionnels).
-- [ ] **Timeline d'Animation (`0..360` frames)** :
-  - Stockage de plusieurs frames par modèle et keyframes de transformation dans le graphe de scène (chunk `META`).
-  - UI Timeline en haut/bas : boutons `+` (ajouter frame), `-` (supprimer), lecture auto, export de séquence d'images et rendu *Turntable* avec *Motion Blur*.
+- [x] **Timeline d'Animation** :
+  - Frames par shape (`NodeKind::Shape { models }`, un modèle par frame, boucle sur sa propre longueur) ; `Scene::current_frame` pilote rendu, picking et opérations.
+  - `.vox` : `nSHP` multi-modèles (`_f`, clés éparses étendues), anciens fichiers multi-modèles = un objet animé, frames `nTRN` supplémentaires conservées.
+  - Timeline (barre du bas) : frames cliquables, lecture en boucle (fps), `+` (copie), `+ vide`, suppression ; vue globale en World Editor.
+  - Undo par modèle (historiques conservés en changeant de frame) ; ajout/suppression de frames annulables depuis le World Editor.
+  - `xs -n N -prev|-cur <shader>` génère N frames (une étape d'undo).
+- [ ] **Animation (reste)** :
+  - Évaluer/éditer les keyframes de transformation (`nTRN` multi-frames : lues et réécrites, pas jouées).
+  - Path Tracer sur la frame courante de la scène, export de séquence d'images, *Turntable*, *Motion Blur*.
 - [ ] **Moteur de Voxel Shaders Externes (`shaders/*.xs` / `.wgsl`)** :
   - Chargement dynamique de fichiers shaders depuis un dossier `shaders/`.
   - Parsing des annotations `// @arg name default min max` pour générer automatiquement des sliders dans l'interface `egui`.

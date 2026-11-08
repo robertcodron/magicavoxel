@@ -10,7 +10,10 @@ pub enum CommandOutcome {
 }
 
 /// Execute a MagicaVoxel console command line (`mv_commands.html`)
-pub fn execute_console_command(project: &mut EditorProject, raw_line: &str) -> Result<CommandOutcome, String> {
+pub fn execute_console_command(
+    project: &mut EditorProject,
+    raw_line: &str,
+) -> Result<CommandOutcome, String> {
     let line = raw_line.trim();
     if line.is_empty() {
         return Ok(CommandOutcome::Message(String::new()));
@@ -412,16 +415,24 @@ pub fn execute_console_command(project: &mut EditorProject, raw_line: &str) -> R
             }
             let mut idx = 0;
             let mut iterations = 1u32;
+            // `-prev` / `-cur`: generate an animation (one new frame per iteration),
+            // each frame based on the previous one / on the current frame.
+            let mut anim: Option<bool> = None; // Some(true) = -prev, Some(false) = -cur
             while idx < args.len() && args[idx].starts_with('-') {
                 match args[idx] {
                     "-n" if idx + 1 < args.len() => {
                         iterations = args[idx + 1]
                             .parse::<u32>()
                             .unwrap_or(1)
-                            .clamp(1, 64);
+                            .clamp(1, 360);
                         idx += 2;
                     }
-                    "-prev" | "-cur" => {
+                    "-prev" => {
+                        anim = Some(true);
+                        idx += 1;
+                    }
+                    "-cur" => {
+                        anim = Some(false);
                         idx += 1;
                     }
                     _ => {
@@ -438,8 +449,32 @@ pub fn execute_console_command(project: &mut EditorProject, raw_line: &str) -> R
                 .filter_map(|s| s.parse::<f32>().ok())
                 .collect();
 
-            project.record_undo();
             let c = project.palette.selected.max(1);
+            if let Some(from_previous) = anim {
+                if project.active_shape.is_none() {
+                    return Err(
+                        "xs -prev/-cur needs an object opened from the World Editor".to_string()
+                    );
+                }
+                // Validate the shader on a scratch copy before touching the scene.
+                run_voxel_shader(&mut project.grid.clone(), &shader_name, &shader_args, c, 0)?;
+                let base = project.grid.clone();
+                project.record_world_undo();
+                for iter in 0..iterations {
+                    project.add_frame_unrecorded(false);
+                    if !from_previous {
+                        project.grid = base.clone();
+                    }
+                    run_voxel_shader(&mut project.grid, &shader_name, &shader_args, c, iter)?;
+                }
+                return Ok(CommandOutcome::Message(format!(
+                    "Voxel shader '{}' generated {} frame(s) ({})",
+                    shader_name,
+                    iterations,
+                    if from_previous { "-prev" } else { "-cur" }
+                )));
+            }
+            project.record_undo();
             for iter in 0..iterations {
                 run_voxel_shader(&mut project.grid, &shader_name, &shader_args, c, iter)?;
             }
@@ -677,4 +712,3 @@ fn run_voxel_shader(
         )),
     }
 }
-
