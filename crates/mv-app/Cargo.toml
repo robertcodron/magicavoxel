@@ -1,0 +1,19 @@
+[package]
+name = "mv-app"
+version.workspace = true
+edition.workspace = true
+
+[[bin]]
+name = "magicavoxel-rs"
+path = "src/main.rs"
+
+[dependencies]
+mv-core = { path = "../mv-core" }
+mv-format = { path = "../mv-format" }
+mv-render = { path = "../mv-render" }
+glam.workspace = true
+eframe.workspace = true
+egui.workspace = true
+rfd.workspace = true
+image.workspace = true
+

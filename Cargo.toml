@@ -1,0 +1,26 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/mv-core",
+    "crates/mv-format",
+    "crates/mv-render",
+    "crates/mv-app",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+authors = ["MagicaVoxel Rust Port"]
+
+[workspace.dependencies]
+glam = "0.29"
+thiserror = "2.0"
+rayon = "1.10"
+eframe = "0.31"
+egui = "0.31"
+rfd = "0.15"
+image = { version = "=0.25.5", default-features = false, features = ["png"] }
+wgpu = "24.0"
+bytemuck = { version = "1.25", features = ["derive"] }
+pollster = "0.4"

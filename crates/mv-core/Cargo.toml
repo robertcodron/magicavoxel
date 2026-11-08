@@ -1,0 +1,9 @@
+[package]
+name = "mv-core"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+glam.workspace = true
+thiserror.workspace = true
+

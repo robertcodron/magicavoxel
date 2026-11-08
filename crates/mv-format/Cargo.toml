@@ -1,0 +1,11 @@
+[package]
+name = "mv-format"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+mv-core = { path = "../mv-core" }
+glam.workspace = true
+thiserror.workspace = true
+image.workspace = true
+
