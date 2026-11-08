@@ -2,3 +2,8 @@
 /target
 /cache
 *.vox.bak
+
+# GitNexus (local code index and the files it generates) and local agent settings
+.gitnexus/
+CLAUDE.md
+.claude/

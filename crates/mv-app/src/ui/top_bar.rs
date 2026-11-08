@@ -37,12 +37,16 @@ impl MagicaVoxelApp {
                 {
                     self.enter_world_editor();
                 }
-                ui.selectable_value(
-                    &mut self.mode,
-                    ViewportMode::PathTracer,
-                    RichText::new("✨ Render (Path Tracer)").strong(),
-                )
-                .on_hover_text("Renders the active model");
+                if ui
+                    .selectable_label(
+                        self.mode == ViewportMode::PathTracer,
+                        RichText::new("✨ Render (Path Tracer)").strong(),
+                    )
+                    .on_hover_text("Path-traced render of the whole scene (current frame)")
+                    .clicked()
+                {
+                    self.enter_render_mode();
+                }
 
                 ui.separator();
                 ui.label("Project:");
@@ -89,16 +93,19 @@ impl MagicaVoxelApp {
                         ui.close_menu();
                         self.handle_export("gltf");
                     }
-                    ui.separator();
-                    ui.label(egui::RichText::new("Edited model only").small());
-                    if ui.button("Wavefront .obj (Greedy Mesh)").clicked() {
+                    if ui
+                        .button("Wavefront .obj (greedy mesh, all objects)")
+                        .clicked()
+                    {
                         ui.close_menu();
                         self.handle_export("obj");
                     }
-                    if ui.button("Point Cloud .ply").clicked() {
+                    if ui.button("Point cloud .ply (all objects)").clicked() {
                         ui.close_menu();
                         self.handle_export("ply");
                     }
+                    ui.separator();
+                    ui.label(egui::RichText::new("Edited model only").small());
                     if ui.button("2D Slice Strip .png").clicked() {
                         ui.close_menu();
                         self.handle_export("slice");

@@ -4,7 +4,8 @@ use mv_core::{EditorProject, MaterialType};
 use rayon::prelude::*;
 use std::hash::{Hash, Hasher};
 
-use crate::{dda_raycast_grid, DisplaySettings, OrbitCamera};
+use crate::world::{Highlight, WorldView};
+use crate::{DisplaySettings, OrbitCamera};
 
 #[derive(Debug, Clone)]
 pub struct PathTracerSettings {
@@ -67,6 +68,66 @@ struct GpuMaterial {
     props1: [f32; 4], // emit, metal, density, att
 }
 
+/// Placed shape for the GPU (see `GpuInstance` in `pathtrace.wgsl`).
+#[repr(C)]
+#[derive(Clone, Copy, Pod, Zeroable)]
+struct GpuInstance {
+    inv_r0: [f32; 4],
+    inv_r1: [f32; 4],
+    inv_r2: [f32; 4],
+    offset: [f32; 4],
+    bmin: [f32; 4],
+    bmax: [f32; 4],
+    size: [u32; 4],
+}
+
+/// Pack the visible scene: model grids concatenated (4 voxels per `u32`, each model
+/// starting on a word boundary, shared models stored once) and one instance each.
+fn pack_scene(view: &WorldView) -> (Vec<u32>, Vec<GpuInstance>) {
+    let mut words: Vec<u32> = Vec::new();
+    let mut base_of: Vec<(*const mv_core::VoxelGrid, u32)> = Vec::new();
+    let mut instances = Vec::with_capacity(view.instances.len());
+    for inst in &view.instances {
+        let key = inst.grid as *const mv_core::VoxelGrid;
+        let base = match base_of.iter().find(|(k, _)| *k == key) {
+            Some(&(_, b)) => b,
+            None => {
+                let b = words.len() as u32;
+                let raw = inst.grid.raw_data();
+                let start = words.len();
+                words.resize(start + raw.len().div_ceil(4), 0);
+                for (i, &v) in raw.iter().enumerate() {
+                    words[start + (i >> 2)] |= (v as u32) << ((i & 3) * 8);
+                }
+                base_of.push((key, b));
+                b
+            }
+        };
+        let row = |i: usize| {
+            let c = |j: usize| {
+                let mut e = Vec3::ZERO;
+                e[j] = 1.0;
+                inst.inverse.apply_f32(e)[i]
+            };
+            [c(0), c(1), c(2), 0.0]
+        };
+        let d = inst.grid.dimensions();
+        instances.push(GpuInstance {
+            inv_r0: row(0),
+            inv_r1: row(1),
+            inv_r2: row(2),
+            offset: [inst.offset.x, inst.offset.y, inst.offset.z, 0.0],
+            bmin: [inst.min.x, inst.min.y, inst.min.z, 0.0],
+            bmax: [inst.max.x, inst.max.y, inst.max.z, 0.0],
+            size: [d.x, d.y, d.z, base],
+        });
+    }
+    if words.is_empty() {
+        words.push(0); // bindings must not be empty
+    }
+    (words, instances)
+}
+
 struct WgpuBackend {
     device: wgpu::Device,
     queue: wgpu::Queue,
@@ -75,6 +136,8 @@ struct WgpuBackend {
     params_buf: wgpu::Buffer,
     materials_buf: wgpu::Buffer,
     voxels_buf: Option<(wgpu::Buffer, usize)>,
+    instances_buf: Option<(wgpu::Buffer, usize)>,
+    instance_count: u32,
     accum_buf: Option<(wgpu::Buffer, u32, u32)>,
     output_buf: Option<(wgpu::Buffer, u32, u32)>,
     staging_buf: Option<(wgpu::Buffer, u32, u32)>,
@@ -199,6 +262,16 @@ impl PathTracerEngine {
                     },
                     count: None,
                 },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 5,
+                    visibility: wgpu::ShaderStages::COMPUTE,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Storage { read_only: true },
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
             ],
         });
 
@@ -239,6 +312,8 @@ impl PathTracerEngine {
             params_buf,
             materials_buf,
             voxels_buf: None,
+            instances_buf: None,
+            instance_count: 0,
             accum_buf: None,
             output_buf: None,
             staging_buf: None,
@@ -258,13 +333,14 @@ impl PathTracerEngine {
         let w = width.max(1) as u32;
         let h = height.max(1) as u32;
 
-        let scene_hash = compute_scene_hash(project);
+        // The whole visible scene at the current animation frame.
+        let view = WorldView::build(project, |_| (Highlight::None, false));
+        let scene_hash = compute_scene_hash(project, &view);
         let cam_hash = compute_camera_and_settings_hash(camera, display, pt);
 
         let scene_changed = scene_hash != self.last_scene_hash;
-        let cam_changed = cam_hash != self.last_camera_hash
-            || w != self.last_width
-            || h != self.last_height;
+        let cam_changed =
+            cam_hash != self.last_camera_hash || w != self.last_width || h != self.last_height;
 
         if scene_changed || cam_changed {
             self.current_samples = 0;
@@ -284,9 +360,22 @@ impl PathTracerEngine {
         };
 
         if self.wgpu_backend.is_some() {
-            self.render_wgpu(project, camera, display, pt, w, h, scene_changed, steps, out_rgba);
+            self.render_wgpu(
+                project,
+                &view,
+                camera,
+                display,
+                pt,
+                w,
+                h,
+                scene_changed,
+                steps,
+                out_rgba,
+            );
         } else {
-            self.render_cpu_fallback(project, camera, display, pt, w as usize, h as usize, steps, out_rgba);
+            self.render_cpu_fallback(
+                project, &view, camera, display, pt, w as usize, h as usize, steps, out_rgba,
+            );
         }
     }
 
@@ -294,6 +383,7 @@ impl PathTracerEngine {
     fn render_wgpu(
         &mut self,
         project: &EditorProject,
+        view: &WorldView,
         camera: &OrbitCamera,
         display: &DisplaySettings,
         pt: &PathTracerSettings,
@@ -305,33 +395,42 @@ impl PathTracerEngine {
     ) {
         let backend = self.wgpu_backend.as_mut().unwrap();
 
-        // 1. Upload packed voxels & materials when changed or uninitialized
-        let raw_voxels = project.grid.raw_data();
-        let packed_len = raw_voxels.len().div_ceil(4).max(1);
-        let need_new_voxel_buf = backend
-            .voxels_buf
-            .as_ref()
-            .map(|(_, len)| *len != packed_len)
-            .unwrap_or(true);
-
-        if need_new_voxel_buf || upload_voxels || self.current_samples == 0 {
-            let mut packed = vec![0u32; packed_len];
-            for (i, &b) in raw_voxels.iter().enumerate() {
-                packed[i >> 2] |= (b as u32) << ((i & 3) * 8);
-            }
-            let byte_slice = bytemuck::cast_slice(&packed);
-            if need_new_voxel_buf {
-                let buf = backend.device.create_buffer(&wgpu::BufferDescriptor {
-                    label: Some("voxels_packed_buf"),
-                    size: byte_slice.len() as u64,
-                    usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
-                    mapped_at_creation: false,
-                });
-                backend.queue.write_buffer(&buf, 0, byte_slice);
-                backend.voxels_buf = Some((buf, packed_len));
-            } else if let Some((buf, _)) = &backend.voxels_buf {
-                backend.queue.write_buffer(buf, 0, byte_slice);
-            }
+        // 1. Upload the packed scene (models + instances) & materials when changed
+        let need_upload =
+            upload_voxels || backend.voxels_buf.is_none() || self.current_samples == 0;
+        if need_upload {
+            let (words, gpu_instances) = pack_scene(view);
+            backend.instance_count = gpu_instances.len() as u32;
+            let instances: Vec<GpuInstance> = if gpu_instances.is_empty() {
+                vec![GpuInstance::zeroed()]
+            } else {
+                gpu_instances
+            };
+            let upload = |slot: &mut Option<(wgpu::Buffer, usize)>, bytes: &[u8], label: &str| {
+                let fits = slot.as_ref().is_some_and(|(_, len)| *len >= bytes.len());
+                if !fits {
+                    let buf = backend.device.create_buffer(&wgpu::BufferDescriptor {
+                        label: Some(label),
+                        size: bytes.len() as u64,
+                        usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+                        mapped_at_creation: false,
+                    });
+                    *slot = Some((buf, bytes.len()));
+                }
+                if let Some((buf, _)) = slot {
+                    backend.queue.write_buffer(buf, 0, bytes);
+                }
+            };
+            upload(
+                &mut backend.voxels_buf,
+                bytemuck::cast_slice(&words),
+                "scene_voxels_packed_buf",
+            );
+            upload(
+                &mut backend.instances_buf,
+                bytemuck::cast_slice(&instances),
+                "scene_instances_buf",
+            );
 
             let gpu_mats = build_gpu_materials(project);
             backend
@@ -377,7 +476,6 @@ impl PathTracerEngine {
 
         let (eye, forward, right, up) = camera.basis();
         let sun = display.sun_direction();
-        let d = project.grid.dimensions();
         let half_tan = (camera.fov_deg.to_radians() * 0.5).tan();
         let mut flags_bits = 0u32;
         if pt.use_aces {
@@ -390,32 +488,43 @@ impl PathTracerEngine {
             flags_bits |= 4;
         }
 
-        let bind_group = backend.device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("pathtrace_bg"),
-            layout: &backend.bind_group_layout,
-            entries: &[
-                wgpu::BindGroupEntry {
-                    binding: 0,
-                    resource: backend.params_buf.as_entire_binding(),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 1,
-                    resource: backend.voxels_buf.as_ref().unwrap().0.as_entire_binding(),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 2,
-                    resource: backend.materials_buf.as_entire_binding(),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 3,
-                    resource: backend.accum_buf.as_ref().unwrap().0.as_entire_binding(),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 4,
-                    resource: backend.output_buf.as_ref().unwrap().0.as_entire_binding(),
-                },
-            ],
-        });
+        let bind_group = backend
+            .device
+            .create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("pathtrace_bg"),
+                layout: &backend.bind_group_layout,
+                entries: &[
+                    wgpu::BindGroupEntry {
+                        binding: 0,
+                        resource: backend.params_buf.as_entire_binding(),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 1,
+                        resource: backend.voxels_buf.as_ref().unwrap().0.as_entire_binding(),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 2,
+                        resource: backend.materials_buf.as_entire_binding(),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 3,
+                        resource: backend.accum_buf.as_ref().unwrap().0.as_entire_binding(),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 4,
+                        resource: backend.output_buf.as_ref().unwrap().0.as_entire_binding(),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 5,
+                        resource: backend
+                            .instances_buf
+                            .as_ref()
+                            .unwrap()
+                            .0
+                            .as_entire_binding(),
+                    },
+                ],
+            });
 
         let wg_x = w.div_ceil(8);
         let wg_y = h.div_ceil(8);
@@ -428,21 +537,32 @@ impl PathTracerEngine {
                 cam_up: [up.x, up.y, up.z, 0.0],
                 sun_dir: [sun.x, sun.y, sun.z, 0.0],
                 sky_color: [pt.sky_color[0], pt.sky_color[1], pt.sky_color[2], 1.0],
-                ground_color: [pt.ground_color[0], pt.ground_color[1], pt.ground_color[2], 1.0],
-                grid_size: [d.x, d.y, d.z, 0],
+                ground_color: [
+                    pt.ground_color[0],
+                    pt.ground_color[1],
+                    pt.ground_color[2],
+                    1.0,
+                ],
+                grid_size: [backend.instance_count, 0, 0, 0],
                 resolution: [w, h, self.current_samples, pt.max_bounces],
                 lens_post: [half_tan, pt.aperture, pt.focus_dist, pt.exposure],
-                post_flags: [pt.vignette, pt.fog_density, pt.sun_intensity, flags_bits as f32],
+                post_flags: [
+                    pt.vignette,
+                    pt.fog_density,
+                    pt.sun_intensity,
+                    flags_bits as f32,
+                ],
             };
             backend
                 .queue
                 .write_buffer(&backend.params_buf, 0, bytemuck::bytes_of(&params));
 
-            let mut encoder = backend
-                .device
-                .create_command_encoder(&wgpu::CommandEncoderDescriptor {
-                    label: Some("pathtrace_encoder"),
-                });
+            let mut encoder =
+                backend
+                    .device
+                    .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                        label: Some("pathtrace_encoder"),
+                    });
             {
                 let mut cpass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
                     label: Some("pathtrace_pass"),
@@ -488,6 +608,7 @@ impl PathTracerEngine {
     fn render_cpu_fallback(
         &mut self,
         project: &EditorProject,
+        view: &WorldView,
         camera: &OrbitCamera,
         display: &DisplaySettings,
         pt: &PathTracerSettings,
@@ -508,7 +629,6 @@ impl PathTracerEngine {
 
         let aspect = width as f32 / height.max(1) as f32;
         let sun_dir = display.sun_direction();
-        let grid = &project.grid;
 
         for _ in 0..steps {
             let sample_idx = self.current_samples;
@@ -529,8 +649,9 @@ impl PathTracerEngine {
                         let ndc_y = 1.0 - ((py as f32 + 0.5 + jy) / height as f32) * 2.0;
                         let (ray_o, ray_d) = camera.ray_for_ndc(Vec2::new(ndc_x, ndc_y), aspect);
 
-                        let rad = if let Some(hit) = dda_raycast_grid(grid, ray_o, ray_d, 1000.0) {
-                            let c = grid.get(hit.voxel.x as u32, hit.voxel.y as u32, hit.voxel.z as u32);
+                        let rad = if let Some(hit) = view.raycast(ray_o, ray_d, 1000.0) {
+                            let grid = view.instances[hit.instance].grid;
+                            let c = grid.get_i32(hit.voxel.x, hit.voxel.y, hit.voxel.z);
                             let col = project.palette.colors[c as usize];
                             let mat = project.materials[c as usize];
                             let albedo = Vec3::new(
@@ -608,9 +729,16 @@ fn build_gpu_materials(project: &EditorProject) -> [GpuMaterial; 256] {
 /// Scene change detection. The voxel content is identified by `VoxelGrid::revision()`
 /// (O(1)) instead of hashing up to 16 MB of voxels every frame; palette and materials
 /// are small (256 entries) and hashed directly.
-fn compute_scene_hash(project: &EditorProject) -> u64 {
+fn compute_scene_hash(project: &EditorProject, view: &WorldView) -> u64 {
     let mut hasher = std::collections::hash_map::DefaultHasher::new();
-    project.grid.revision().hash(&mut hasher);
+    view.instances.len().hash(&mut hasher);
+    for inst in &view.instances {
+        inst.grid.revision().hash(&mut hasher);
+        inst.rotation.hash(&mut hasher);
+        for v in [inst.offset, inst.min, inst.max] {
+            v.to_array().map(f32::to_bits).hash(&mut hasher);
+        }
+    }
     for i in 1..=255 {
         let c = project.palette.colors[i];
         [c.r, c.g, c.b, c.a].hash(&mut hasher);
@@ -660,3 +788,142 @@ fn compute_camera_and_settings_hash(
     hasher.finish()
 }
 
+#[cfg(test)]
+mod scene_tests {
+    use super::*;
+    use glam::IVec3;
+    use mv_core::{Axis, Rotation, Transform, VoxelGrid};
+
+    /// Scene with nothing in the edited model: an emissive asymmetric object placed with
+    /// a mirroring rotation inside a rotated group, plus a rotated instance of it.
+    fn scene() -> (EditorProject, mv_core::NodeId) {
+        let mut proj = EditorProject::new_empty(4, 4, 4); // active model stays empty
+                                                          // Chunky asymmetric "L" (2 voxels thick) plus a lone marker voxel.
+        let mut l_shape = VoxelGrid::new(8, 6, 8);
+        for x in 0..8 {
+            for t in 0..2 {
+                for u in 0..2 {
+                    l_shape.set(x, t, u, 9);
+                }
+            }
+        }
+        for z in 0..8 {
+            for t in 0..2 {
+                for u in 4..6 {
+                    l_shape.set(t, u, z, 9);
+                }
+            }
+        }
+        l_shape.set(7, 5, 7, 9);
+        proj.materials[9].kind = MaterialType::Emit;
+        proj.materials[9].emit = 1.0;
+        let m = proj.scene.add_model(l_shape);
+        let root = proj.scene.root();
+        let g = proj
+            .scene
+            .add_group(
+                root,
+                Transform {
+                    rotation: Rotation::rot90(Axis::Z),
+                    translation: IVec3::new(30, 0, 6),
+                },
+            )
+            .unwrap();
+        let a = proj
+            .scene
+            .add_shape(
+                g,
+                m,
+                Transform {
+                    rotation: Rotation::from_vox_byte(0b0010100), // mirror
+                    translation: IVec3::new(0, 3, 0),
+                },
+            )
+            .unwrap();
+        let b = proj.scene.instantiate(a).unwrap();
+        proj.scene.rotate90(b, Axis::X).unwrap();
+        proj.scene.translate_world(b, IVec3::new(0, 9, 0)).unwrap();
+        (proj, a)
+    }
+
+    fn settings() -> (DisplaySettings, PathTracerSettings) {
+        let display = DisplaySettings {
+            show_ground: false,
+            show_background: false,
+            ..Default::default()
+        };
+        let pt = PathTracerSettings {
+            aperture: 0.0,
+            fog_density: 0.0,
+            vignette: 0.0,
+            ..Default::default()
+        };
+        (display, pt)
+    }
+
+    /// Bright pixels = emissive voxels hit by the primary ray.
+    fn mask(rgba: &[u8]) -> Vec<bool> {
+        rgba.chunks(4).map(|p| p[0] > 120).collect()
+    }
+
+    #[test]
+    fn gpu_renders_the_whole_scene_with_world_placement() {
+        let mut engine = PathTracerEngine::new();
+        if !engine.is_gpu_accelerated() {
+            eprintln!("skipping: no GPU");
+            return;
+        }
+        let (proj, a) = scene();
+        let (display, pt) = settings();
+        let view = WorldView::build(&proj, |_| (Highlight::None, false));
+        assert_eq!(
+            view.instances.len(),
+            3,
+            "edited (empty) model + 2 instances"
+        );
+        // Frame the two placed objects (not the empty edited model at the origin).
+        let (lo, hi) = view.instances[1..].iter().fold(
+            (Vec3::splat(f32::MAX), Vec3::splat(f32::MIN)),
+            |(l, h), i| (l.min(i.min), h.max(i.max)),
+        );
+        let mut camera = OrbitCamera::default();
+        camera.frame_box(lo, hi);
+        camera.distance *= 0.8;
+
+        let (w, h) = (128usize, 96usize);
+        let mut rgba = Vec::new();
+        engine.render_progressive(&proj, &camera, &display, &pt, w, h, &mut rgba);
+        let gpu = mask(&rgba);
+
+        // Reference silhouette from the CPU world ray caster at pixel centers.
+        let aspect = w as f32 / h as f32;
+        let mut cpu = Vec::with_capacity(w * h);
+        for py in 0..h {
+            for px in 0..w {
+                let ndc = Vec2::new(
+                    ((px as f32 + 0.5) / w as f32) * 2.0 - 1.0,
+                    1.0 - ((py as f32 + 0.5) / h as f32) * 2.0,
+                );
+                let (o, d) = camera.ray_for_ndc(ndc, aspect);
+                cpu.push(view.raycast(o, d, 1000.0).is_some());
+            }
+        }
+        let hits = cpu.iter().filter(|&&c| c).count();
+        let agree = gpu.iter().zip(&cpu).filter(|(g, c)| g == c).count();
+        let mismatch = w * h - agree;
+        eprintln!("silhouette: {hits} px hit, {mismatch} px differ");
+        assert!(hits > 200, "object visible ({hits} px)");
+        // Only anti-aliasing jitter on silhouette edges may differ.
+        assert!(
+            mismatch * 10 < hits,
+            "GPU silhouette differs from the scene: {mismatch} px of {hits}"
+        );
+
+        // Hiding one instance changes the image (scene changes are detected).
+        let mut hidden = proj.clone();
+        hidden.scene.node_mut(a).unwrap().hidden = true;
+        engine.render_progressive(&hidden, &camera, &display, &pt, w, h, &mut rgba);
+        let fewer = mask(&rgba).iter().filter(|&&b| b).count();
+        assert!(fewer < gpu.iter().filter(|&&b| b).count());
+    }
+}

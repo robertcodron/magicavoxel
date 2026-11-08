@@ -736,6 +736,65 @@ fn closing_with_unsaved_changes_is_cancelled_until_confirmed() {
     assert!(h.app.allow_close);
 }
 
+#[test]
+fn render_mode_shows_the_whole_scene() {
+    // Edited model empty; the visible geometry lives in another object far away.
+    let mut proj = EditorProject::new_empty(4, 4, 4);
+    let mut cube = mv_core::VoxelGrid::new(6, 6, 6);
+    cube.full(9);
+    let m = proj.scene.add_model(cube);
+    let root = proj.scene.root();
+    let far = proj
+        .scene
+        .add_shape(
+            root,
+            m,
+            mv_core::Transform::from_translation(IVec3::new(40, 0, 3)),
+        )
+        .unwrap();
+    let mut h = Harness::new(proj);
+    h.app.display.render_scale = 6;
+
+    // Entering the renderer from the Model Editor frames the edited object (world space).
+    h.app.enter_render_mode();
+    assert_eq!(h.app.mode, ViewportMode::PathTracer);
+    let edited_center = h.app.camera.target;
+    assert!(
+        edited_center.x.abs() < 4.0,
+        "framed on the edited object at the origin"
+    );
+
+    // F4 frames the whole scene, which includes the far object.
+    h.key(Key::F4);
+    assert!(h.app.camera.target.x > 10.0, "scene framing reaches x = 40");
+    h.step();
+    h.step();
+    let [w, hgt] = h.app.last_render_dims;
+    let px = |x: usize, y: usize| {
+        let i = (y * w + x) * 4;
+        h.app.rgba_buffer[i..i + 3].to_vec()
+    };
+    let distinct: std::collections::HashSet<Vec<u8>> = (0..hgt)
+        .step_by(3)
+        .flat_map(|y| (0..w).step_by(3).map(move |x| (x, y)))
+        .map(|(x, y)| px(x, y))
+        .collect();
+    assert!(distinct.len() > 8, "a rendered scene, not a flat sky");
+
+    // Picking in the renderer hits the far object (world picking): DOF focus set.
+    let (lo, hi) = h.app.project.scene.world_bounds(far).unwrap();
+    let top = glam::Vec3::new(
+        (lo.x + hi.x + 1) as f32 * 0.5,
+        (lo.y + hi.y + 1) as f32 * 0.5,
+        (hi.z + 1) as f32 - 0.01,
+    );
+    let before = h.app.pt_settings.focus_dist;
+    h.click(h.world_to_screen(top));
+    let eye = h.app.camera.basis().0;
+    assert_ne!(h.app.pt_settings.focus_dist, before);
+    assert!((h.app.pt_settings.focus_dist - eye.distance(top)).abs() < 1.5);
+}
+
 /// Manual visual check: `VOX_IN=scene.vox PNG_OUT=out.png cargo test -p mv-app
 /// world_snapshot -- --ignored` renders the World Editor viewport of a file to a PNG.
 #[test]
@@ -748,6 +807,17 @@ fn world_snapshot() {
     let mut h = Harness::new(proj);
     h.app.display.render_scale = 1;
     h.key(Key::Tab);
+    if std::env::var("RENDER").is_ok() {
+        // Path-traced render of the whole scene (`RENDER=1`), from the World camera.
+        h.app.enter_render_mode();
+        h.app.pt_settings.samples_per_frame = 8;
+        if let Ok(fog) = std::env::var("FOG") {
+            h.app.pt_settings.fog_density = fog.parse().unwrap_or(0.0);
+        }
+        for _ in 0..12 {
+            h.step();
+        }
+    }
     // Select the first top-level object to show the selection frame.
     let root = h.app.project.scene.root();
     if let Some(&first) = h.app.project.scene.node(root).unwrap().children().first() {

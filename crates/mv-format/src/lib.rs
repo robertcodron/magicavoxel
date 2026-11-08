@@ -8,6 +8,7 @@ use thiserror::Error;
 
 mod gltf;
 mod mesh;
+mod placed;
 mod scene_io;
 
 pub use gltf::{
@@ -156,91 +157,131 @@ pub fn load_vox_file(path: impl AsRef<Path>) -> Result<EditorProject, FormatErro
     Ok(project)
 }
 
-/// Wavefront `.obj` export of the edited model with greedy meshing and vertex colors.
+/// Wavefront `.obj` export of the **visible scene** (one `o` object per shape, at its
+/// world placement, current animation frame), greedy meshed with vertex colors.
 /// Axes are converted from MagicaVoxel (Z up) to OBJ (Y up) with `(x, y, z) -> (x, z, -y)`
 /// (a proper rotation: no mirroring, faces stay counter-clockwise from outside).
+/// Returns the number of quads.
 pub fn export_obj_greedy(
     project: &EditorProject,
     path: impl AsRef<Path>,
 ) -> Result<usize, FormatError> {
-    let quads = mesh::greedy_quads(&project.grid);
+    let shapes = placed::visible_shapes(project);
+    let mut quads_of: HashMap<usize, Vec<mesh::GreedyQuad>> = HashMap::new();
     let mut w = BufWriter::new(File::create(path)?);
-    writeln!(w, "# Exported by MagicaVoxel Rust Edition (Greedy Meshing)")?;
-    writeln!(w, "o {}", project.name)?;
+    writeln!(
+        w,
+        "# Exported by MagicaVoxel Rust Edition (Greedy Meshing, whole scene)"
+    )?;
 
-    let y_up = |p: [f32; 3]| [p[0], p[2], -p[1]];
-    for q in &quads {
-        let col = project.palette.colors[q.color as usize];
-        for c in q.corners {
-            let v = y_up(c);
-            writeln!(
-                w,
-                "v {:.3} {:.3} {:.3} {:.4} {:.4} {:.4}",
-                v[0],
-                v[1],
-                v[2],
-                col.r as f32 / 255.0,
-                col.g as f32 / 255.0,
-                col.b as f32 / 255.0
-            )?;
-        }
-    }
+    let y_up = |p: glam::Vec3| [p.x, p.z, -p.y];
     // The six axis normals, indexed 1..=6.
-    let normals: [[i32; 3]; 6] = [[-1, 0, 0], [1, 0, 0], [0, -1, 0], [0, 1, 0], [0, 0, -1], [0, 0, 1]];
+    let normals: [[i32; 3]; 6] = [
+        [-1, 0, 0],
+        [1, 0, 0],
+        [0, -1, 0],
+        [0, 1, 0],
+        [0, 0, -1],
+        [0, 0, 1],
+    ];
     for n in normals {
-        let m = y_up([n[0] as f32, n[1] as f32, n[2] as f32]);
+        let m = y_up(glam::Vec3::new(n[0] as f32, n[1] as f32, n[2] as f32));
         writeln!(w, "vn {} {} {}", m[0], m[1], m[2])?;
     }
-    for (k, q) in quads.iter().enumerate() {
-        let n = 1 + normals.iter().position(|&n| n == q.normal).unwrap_or(0);
-        let b = 4 * k + 1;
-        writeln!(
-            w,
-            "f {}//{n} {}//{n} {}//{n} {}//{n}",
-            b,
-            b + 1,
-            b + 2,
-            b + 3
-        )?;
+
+    let mut next_vertex = 1usize;
+    let mut total = 0usize;
+    for shape in &shapes {
+        let quads = quads_of
+            .entry(shape.model_id)
+            .or_insert_with(|| mesh::greedy_quads(shape.grid));
+        if quads.is_empty() {
+            continue;
+        }
+        writeln!(w, "o {}", shape.name.replace(char::is_whitespace, "_"))?;
+        for q in quads.iter() {
+            let col = project.palette.colors[q.color as usize];
+            for c in q.corners {
+                let v = y_up(shape.world_point(c));
+                writeln!(
+                    w,
+                    "v {:.3} {:.3} {:.3} {:.4} {:.4} {:.4}",
+                    v[0],
+                    v[1],
+                    v[2],
+                    col.r as f32 / 255.0,
+                    col.g as f32 / 255.0,
+                    col.b as f32 / 255.0
+                )?;
+            }
+        }
+        for q in quads.iter() {
+            let wn = shape.world_normal(q.normal).to_array();
+            let n = 1 + normals.iter().position(|&n| n == wn).unwrap_or(0);
+            let b = next_vertex;
+            // Rotations may mirror (determinant -1): keep faces counter-clockwise.
+            let (i1, i3) = if shape.voxel_xf.rotation.is_mirror() {
+                (b + 3, b + 1)
+            } else {
+                (b + 1, b + 3)
+            };
+            writeln!(w, "f {b}//{n} {i1}//{n} {}//{n} {i3}//{n}", b + 2)?;
+            next_vertex += 4;
+        }
+        total += quads.len();
     }
     w.flush()?;
-    Ok(quads.len())
+    Ok(total)
 }
 
+/// Stanford `.ply` point cloud of the surface voxels of the **visible scene**, at world
+/// voxel coordinates (MagicaVoxel axes, current animation frame). Returns the number
+/// of points.
 pub fn export_ply_point_cloud(
     project: &EditorProject,
     path: impl AsRef<Path>,
 ) -> Result<usize, FormatError> {
-    let grid = &project.grid;
     let mut points = Vec::new();
-    for z in 0..grid.size_z() {
-        for y in 0..grid.size_y() {
-            for x in 0..grid.size_x() {
-                let c = grid.get(x, y, z);
-                if c != 0 && !grid.is_interior_solid(x as i32, y as i32, z as i32) {
-                    points.push((x, y, z, project.palette.colors[c as usize]));
+    for shape in placed::visible_shapes(project) {
+        let grid = shape.grid;
+        for z in 0..grid.size_z() {
+            for y in 0..grid.size_y() {
+                for x in 0..grid.size_x() {
+                    let c = grid.get(x, y, z);
+                    if c != 0 && !grid.is_interior_solid(x as i32, y as i32, z as i32) {
+                        let p = shape
+                            .voxel_xf
+                            .apply(glam::IVec3::new(x as i32, y as i32, z as i32));
+                        points.push((p, project.palette.colors[c as usize]));
+                    }
                 }
             }
         }
     }
 
-    let file = File::create(path)?;
-    let mut w = BufWriter::new(file);
+    let mut w = BufWriter::new(File::create(path)?);
     writeln!(w, "ply")?;
     writeln!(w, "format ascii 1.0")?;
-    writeln!(w, "comment Exported by MagicaVoxel Rust Edition")?;
+    writeln!(
+        w,
+        "comment Exported by MagicaVoxel Rust Edition (whole scene)"
+    )?;
     writeln!(w, "element vertex {}", points.len())?;
-    writeln!(w, "property float x")?;
-    writeln!(w, "property float y")?;
-    writeln!(w, "property float z")?;
-    writeln!(w, "property uchar red")?;
-    writeln!(w, "property uchar green")?;
-    writeln!(w, "property uchar blue")?;
-    writeln!(w, "end_header")?;
-
-    for (x, y, z, col) in &points {
-        writeln!(w, "{} {} {} {} {} {}", x, y, z, col.r, col.g, col.b)?;
+    for prop in [
+        "float x",
+        "float y",
+        "float z",
+        "uchar red",
+        "uchar green",
+        "uchar blue",
+    ] {
+        writeln!(w, "property {prop}")?;
     }
+    writeln!(w, "end_header")?;
+    for (p, col) in &points {
+        writeln!(w, "{} {} {} {} {} {}", p.x, p.y, p.z, col.r, col.g, col.b)?;
+    }
+    w.flush()?;
     Ok(points.len())
 }
 
@@ -732,31 +773,156 @@ mod tests {
         proj.grid.set(0, 0, 0, 19);
         proj.materials[20].kind = MaterialType::Metal; // forces MATL chunks to exist
         let decoded = from_vox_bytes(&to_vox_bytes(&proj)).unwrap();
-        assert_eq!(decoded.materials[19], Material { id: 19, ..Default::default() });
+        assert_eq!(
+            decoded.materials[19],
+            Material {
+                id: 19,
+                ..Default::default()
+            }
+        );
         assert_eq!(decoded.materials[79].kind, MaterialType::Diffuse);
         assert_eq!(decoded.materials[217].kind, MaterialType::Diffuse);
     }
 
-    #[test]
-    fn test_obj_export_is_a_rotation_not_a_mirror() {
-        // A voxel at the back (high Y) and the top (high Z) of a 2x4x3 model.
-        let mut proj = EditorProject::new_empty(2, 4, 3);
-        proj.grid.set(0, 3, 2, 5);
-        let path = std::env::temp_dir().join(format!("mv-rs-obj-{}.obj", std::process::id()));
-        export_obj_greedy(&proj, &path).unwrap();
+    /// Parse `v` and `f` lines of an OBJ written by `export_obj_greedy`:
+    /// per object, its vertices and quads (vertex indices + normal index).
+    fn read_obj(
+        text: &str,
+    ) -> (
+        Vec<[f32; 3]>,
+        Vec<[f32; 3]>,
+        Vec<(String, Vec<([usize; 4], usize)>)>,
+    ) {
+        let (mut verts, mut normals, mut objects) = (Vec::new(), Vec::new(), Vec::new());
+        for line in text.lines() {
+            let mut it = line.split_whitespace();
+            match it.next() {
+                Some("v") => {
+                    let v: Vec<f32> = it.take(3).map(|x| x.parse().unwrap()).collect();
+                    verts.push([v[0], v[1], v[2]]);
+                }
+                Some("vn") => {
+                    let v: Vec<f32> = it.map(|x| x.parse().unwrap()).collect();
+                    normals.push([v[0], v[1], v[2]]);
+                }
+                Some("o") => objects.push((it.next().unwrap().to_string(), Vec::new())),
+                Some("f") => {
+                    let parts: Vec<(usize, usize)> = it
+                        .map(|p| {
+                            let (v, n) = p.split_once("//").unwrap();
+                            (v.parse().unwrap(), n.parse().unwrap())
+                        })
+                        .collect();
+                    let quad = [parts[0].0, parts[1].0, parts[2].0, parts[3].0];
+                    objects.last_mut().unwrap().1.push((quad, parts[0].1));
+                }
+                _ => {}
+            }
+        }
+        (verts, normals, objects)
+    }
+
+    fn export_obj_text(proj: &EditorProject) -> String {
+        let path = std::env::temp_dir().join(format!(
+            "mv-rs-obj-{}-{:?}.obj",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        export_obj_greedy(proj, &path).unwrap();
         let text = std::fs::read_to_string(&path).unwrap();
         let _ = std::fs::remove_file(&path);
-        let verts: Vec<[f32; 3]> = text
-            .lines()
-            .filter_map(|l| l.strip_prefix("v "))
-            .map(|l| {
-                let v: Vec<f32> = l.split_whitespace().take(3).map(|x| x.parse().unwrap()).collect();
-                [v[0], v[1], v[2]]
-            })
-            .collect();
-        assert_eq!(verts.len(), 24);
-        // MagicaVoxel up (Z in 2..3) becomes OBJ up (Y); depth Y in 3..4 becomes -Z.
-        assert!(verts.iter().all(|v| (2.0..=3.0).contains(&v[1])));
-        assert!(verts.iter().all(|v| (-4.0..=-3.0).contains(&v[2])));
+        text
+    }
+
+    #[test]
+    fn test_obj_export_is_a_rotation_not_a_mirror() {
+        // A voxel at the back (high Y) and the top (high Z) of a 2x4x3 model, which is
+        // centered on its node (half size = (1, 2, 1)): world cell (-1, 1, 1).
+        let mut proj = EditorProject::new_empty(2, 4, 3);
+        proj.grid.set(0, 3, 2, 5);
+        let (verts, _, objects) = read_obj(&export_obj_text(&proj));
+        assert_eq!((verts.len(), objects.len()), (24, 1));
+        // MagicaVoxel up (Z in 1..2) becomes OBJ up (Y); depth Y in 1..2 becomes -Z.
+        assert!(verts.iter().all(|v| (1.0..=2.0).contains(&v[1])));
+        assert!(verts.iter().all(|v| (-2.0..=-1.0).contains(&v[2])));
+    }
+
+    #[test]
+    fn test_obj_exports_the_whole_scene_with_outward_faces() {
+        // Edited model + a mirrored, rotated instance and a hidden one.
+        let mut proj = EditorProject::new_empty(3, 2, 4);
+        proj.grid.full(7);
+        proj.grid.set(0, 0, 3, 0); // asymmetric
+        let root = proj.scene.root();
+        let base = proj.scene.shapes_under(root)[0];
+        let mirrored = proj.scene.instantiate(base).unwrap();
+        {
+            let n = proj.scene.node_mut(mirrored).unwrap();
+            n.transform.rotation = Rotation::from_vox_byte(0b0010100);
+            n.transform.translation = IVec3::new(10, -3, 2);
+            n.name = Some("mirrored copy".into());
+        }
+        let hidden = proj.scene.instantiate(base).unwrap();
+        proj.scene.node_mut(hidden).unwrap().hidden = true;
+        assert!(proj
+            .scene
+            .node(mirrored)
+            .unwrap()
+            .transform
+            .rotation
+            .is_mirror());
+
+        let (verts, normals, objects) = read_obj(&export_obj_text(&proj));
+        assert_eq!(objects.len(), 2, "hidden shape skipped");
+        assert_eq!(objects[1].0, "mirrored_copy");
+        let to_mv = |v: [f32; 3]| [v[0], -v[2], v[1]]; // OBJ (x, y, z) -> MagicaVoxel
+        for ((_, faces), shape) in objects.iter().zip([base, mirrored]) {
+            let (lo, hi) = proj.scene.world_bounds(shape).unwrap();
+            let (mut elo, mut ehi) = ([f32::MAX; 3], [f32::MIN; 3]);
+            for (quad, n) in faces {
+                let p: Vec<[f32; 3]> = quad.iter().map(|&i| verts[i - 1]).collect();
+                for v in &p {
+                    let m = to_mv(*v);
+                    for k in 0..3 {
+                        elo[k] = elo[k].min(m[k]);
+                        ehi[k] = ehi[k].max(m[k]);
+                    }
+                }
+                // Counter-clockwise from outside: geometric normal along the `vn`.
+                let e1 = [p[1][0] - p[0][0], p[1][1] - p[0][1], p[1][2] - p[0][2]];
+                let e2 = [p[2][0] - p[0][0], p[2][1] - p[0][1], p[2][2] - p[0][2]];
+                let g = [
+                    e1[1] * e2[2] - e1[2] * e2[1],
+                    e1[2] * e2[0] - e1[0] * e2[2],
+                    e1[0] * e2[1] - e1[1] * e2[0],
+                ];
+                let vn = normals[n - 1];
+                assert!(
+                    g[0] * vn[0] + g[1] * vn[1] + g[2] * vn[2] > 0.0,
+                    "face winding"
+                );
+            }
+            assert_eq!(elo, lo.as_vec3().to_array());
+            assert_eq!(ehi, (hi + IVec3::ONE).as_vec3().to_array());
+        }
+    }
+
+    #[test]
+    fn test_ply_exports_world_voxel_positions() {
+        let mut proj = EditorProject::new_empty(2, 2, 2);
+        proj.grid.set(1, 1, 1, 3);
+        let root = proj.scene.root();
+        let s = proj.scene.shapes_under(root)[0];
+        let copy = proj.scene.instantiate(s).unwrap();
+        proj.scene
+            .translate_world(copy, IVec3::new(5, 0, 0))
+            .unwrap();
+        let path = std::env::temp_dir().join(format!("mv-rs-ply-{}.ply", std::process::id()));
+        assert_eq!(export_ply_point_cloud(&proj, &path).unwrap(), 2);
+        let text = std::fs::read_to_string(&path).unwrap();
+        let _ = std::fs::remove_file(&path);
+        // Voxel (1,1,1) of a 2³ model centered on its node -> world (0,0,0) and (5,0,0).
+        assert!(text.contains("\n0 0 0 "), "{text}");
+        assert!(text.contains("\n5 0 0 "), "{text}");
     }
 }

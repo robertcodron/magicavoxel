@@ -110,10 +110,40 @@ impl MagicaVoxelApp {
         if self.mode == ViewportMode::WorldEditor {
             return;
         }
+        // The Model Editor camera is in model space; the renderer's is already in world
+        // space and is kept.
+        let from_model = self.mode == ViewportMode::ModelEditor;
         self.mode = ViewportMode::WorldEditor;
         self.world.skip_record = true;
         self.sanitize_world_state();
-        self.frame_world_camera();
+        if from_model {
+            self.frame_world_camera();
+        }
+    }
+
+    /// Path-traced view of the whole scene (world space). Coming from the Model Editor,
+    /// frame the object being edited.
+    pub(crate) fn enter_render_mode(&mut self) {
+        if self.mode == ViewportMode::PathTracer {
+            return;
+        }
+        if self.mode == ViewportMode::ModelEditor {
+            let scene = &self.project.scene;
+            let target = self
+                .project
+                .active_shape
+                .filter(|&s| scene.node(s).is_some())
+                .unwrap_or(scene.root());
+            if let Some((lo, hi)) = scene
+                .world_bounds(target)
+                .or_else(|| scene.world_bounds(scene.root()))
+            {
+                self.camera
+                    .frame_box(lo.as_vec3(), (hi + IVec3::ONE).as_vec3());
+            }
+        }
+        self.mode = ViewportMode::PathTracer;
+        self.pathtracer.reset_accumulation();
     }
 
     /// Open a shape's model in the Model Editor.
@@ -129,7 +159,8 @@ impl MagicaVoxelApp {
     /// Model Editor button / `TAB` without selection: edit the selected shape if there is
     /// exactly one, else keep the active model.
     pub(crate) fn enter_model_editor(&mut self) {
-        match self.single_selection() {
+        let from_world = self.mode == ViewportMode::WorldEditor;
+        match self.single_selection().filter(|_| from_world) {
             Some(s)
                 if self
                     .project
@@ -141,7 +172,8 @@ impl MagicaVoxelApp {
                 self.edit_shape_in_model_editor(s);
             }
             _ => {
-                if self.mode == ViewportMode::WorldEditor {
+                if self.mode != ViewportMode::ModelEditor {
+                    // World / render cameras are in world space.
                     self.camera.recenter(&self.project.grid);
                 }
                 self.mode = ViewportMode::ModelEditor;

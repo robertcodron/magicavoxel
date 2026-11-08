@@ -6,7 +6,7 @@ struct PathTraceParams {
     sun_dir: vec4<f32>,
     sky_color: vec4<f32>,
     ground_color: vec4<f32>,
-    grid_size: vec4<u32>,      // x, y, z, pad
+    grid_size: vec4<u32>,      // x = instance count
     resolution: vec4<u32>,     // width, height, sample_index, max_bounces
     lens_post: vec4<f32>,      // fov_half_tan, aperture, focus_dist, exposure
     post_flags: vec4<f32>,     // vignette, fog_density, sun_intensity, flags_bits (bit0=aces, bit1=ground, bit2=sky_bg)
@@ -23,6 +23,19 @@ struct GpuMaterial {
 @group(0) @binding(2) var<storage, read> materials: array<GpuMaterial>;
 @group(0) @binding(3) var<storage, read_write> accum_buffer: array<vec4<f32>>;
 @group(0) @binding(4) var<storage, read_write> output_rgba: array<u32>;
+
+// One placed shape of the scene (two-level structure: instances -> model grids).
+// local = inv_rot * (world - offset); world normal = inv_rot^T * local normal.
+struct GpuInstance {
+    inv_r0: vec4<f32>,
+    inv_r1: vec4<f32>,
+    inv_r2: vec4<f32>,
+    offset: vec4<f32>,
+    bmin: vec4<f32>,           // world AABB
+    bmax: vec4<f32>,
+    size: vec4<u32>,           // model size xyz, w = first word in voxels_packed
+};
+@group(0) @binding(5) var<storage, read> instances: array<GpuInstance>;
 
 const PI: f32 = 3.14159265359;
 
@@ -56,15 +69,12 @@ fn cosine_sample_hemisphere(n: vec3<f32>, u1: f32, u2: f32) -> vec3<f32> {
     return normalize(tangent * x + bitangent * y + n * z);
 }
 
-fn get_voxel(x: i32, y: i32, z: i32) -> u32 {
-    let sx = i32(params.grid_size.x);
-    let sy = i32(params.grid_size.y);
-    let sz = i32(params.grid_size.z);
-    if (x < 0 || y < 0 || z < 0 || x >= sx || y >= sy || z >= sz) {
+fn get_voxel(size: vec3<i32>, base: u32, p: vec3<i32>) -> u32 {
+    if (any(p < vec3<i32>(0)) || any(p >= size)) {
         return 0u;
     }
-    let idx = u32(x + y * sx + z * sx * sy);
-    let word = voxels_packed[idx >> 2u];
+    let idx = u32(p.x + p.y * size.x + p.z * size.x * size.y);
+    let word = voxels_packed[base + (idx >> 2u)];
     let shift = (idx & 3u) * 8u;
     return (word >> shift) & 0xFFu;
 }
@@ -95,6 +105,91 @@ fn intersect_aabb(ro: vec3<f32>, rd: vec3<f32>, bmin: vec3<f32>, bmax: vec3<f32>
     return vec3<f32>(tmin, tmax, f32(entry_axis));
 }
 
+/// DDA through one instance's model grid, in the instance's local space. Returns the
+/// hit with `t` along the (unit length) local ray, which equals the world distance.
+fn trace_instance(inst: GpuInstance, ro_w: vec3<f32>, rd_w: vec3<f32>, max_dist: f32) -> HitResult {
+    var result: HitResult;
+    result.hit = false;
+    result.is_ground = false;
+    result.t = max_dist;
+    result.voxel_color = 0u;
+    result.normal = vec3<f32>(0.0, 0.0, 1.0);
+    result.pos = ro_w;
+
+    let rel = ro_w - inst.offset.xyz;
+    let ro = vec3<f32>(dot(inst.inv_r0.xyz, rel), dot(inst.inv_r1.xyz, rel), dot(inst.inv_r2.xyz, rel));
+    let rd = vec3<f32>(dot(inst.inv_r0.xyz, rd_w), dot(inst.inv_r1.xyz, rd_w), dot(inst.inv_r2.xyz, rd_w));
+    let size = vec3<i32>(inst.size.xyz);
+    let base = inst.size.w;
+
+    let box_hit = intersect_aabb(ro, rd, vec3<f32>(0.0), vec3<f32>(size));
+    let t_enter = box_hit.x;
+    let t_exit = box_hit.y;
+    if (t_enter > t_exit || t_exit <= 0.0 || t_enter >= max_dist) {
+        return result;
+    }
+
+    let t_start = max(t_enter, 0.0);
+    let p_start = ro + rd * (t_start + 1e-4);
+    var map_pos = clamp(vec3<i32>(floor(p_start)), vec3<i32>(0), size - vec3<i32>(1));
+    let step = select(vec3<i32>(-1), vec3<i32>(1), rd >= vec3<f32>(0.0));
+    let inv_abs = 1.0 / max(abs(rd), vec3<f32>(1e-6));
+    let next_b = vec3<f32>(map_pos) + select(vec3<f32>(0.0), vec3<f32>(1.0), rd >= vec3<f32>(0.0));
+    var t_max = vec3<f32>(t_start) + abs(next_b - p_start) * inv_abs;
+    let t_delta = inv_abs;
+
+    var n = vec3<f32>(0.0);
+    let axis = i32(box_hit.z);
+    if (axis == 0) {
+        n = vec3<f32>(-f32(step.x), 0.0, 0.0);
+    } else if (axis == 1) {
+        n = vec3<f32>(0.0, -f32(step.y), 0.0);
+    } else {
+        n = vec3<f32>(0.0, 0.0, -f32(step.z));
+    }
+
+    var t_cur = t_start;
+    for (var i: u32 = 0u; i < 800u; i = i + 1u) {
+        if (any(map_pos < vec3<i32>(0)) || any(map_pos >= size) || t_cur > max_dist) {
+            break;
+        }
+        let c = get_voxel(size, base, map_pos);
+        if (c != 0u) {
+            result.hit = true;
+            result.t = t_cur;
+            result.voxel_color = c;
+            result.normal = n.x * inst.inv_r0.xyz + n.y * inst.inv_r1.xyz + n.z * inst.inv_r2.xyz;
+            result.pos = ro_w + rd_w * t_cur;
+            break;
+        }
+        if (t_max.x < t_max.y) {
+            if (t_max.x < t_max.z) {
+                map_pos.x += step.x;
+                t_cur = t_max.x;
+                t_max.x += t_delta.x;
+                n = vec3<f32>(-f32(step.x), 0.0, 0.0);
+            } else {
+                map_pos.z += step.z;
+                t_cur = t_max.z;
+                t_max.z += t_delta.z;
+                n = vec3<f32>(0.0, 0.0, -f32(step.z));
+            }
+        } else if (t_max.y < t_max.z) {
+            map_pos.y += step.y;
+            t_cur = t_max.y;
+            t_max.y += t_delta.y;
+            n = vec3<f32>(0.0, -f32(step.y), 0.0);
+        } else {
+            map_pos.z += step.z;
+            t_cur = t_max.z;
+            t_max.z += t_delta.z;
+            n = vec3<f32>(0.0, 0.0, -f32(step.z));
+        }
+    }
+    return result;
+}
+
+/// Nearest hit over every instance (world AABB culling first), then the ground plane.
 fn trace_scene(ro: vec3<f32>, rd: vec3<f32>, max_dist: f32, ignore_color: u32) -> HitResult {
     var result: HitResult;
     result.hit = false;
@@ -104,85 +199,16 @@ fn trace_scene(ro: vec3<f32>, rd: vec3<f32>, max_dist: f32, ignore_color: u32) -
     result.normal = vec3<f32>(0.0, 0.0, 1.0);
     result.pos = ro;
 
-    let bmax = vec3<f32>(
-        f32(params.grid_size.x),
-        f32(params.grid_size.y),
-        f32(params.grid_size.z)
-    );
-    let box_hit = intersect_aabb(ro, rd, vec3<f32>(0.0), bmax);
-    let t_enter = box_hit.x;
-    let t_exit = box_hit.y;
-
-    if (t_enter <= t_exit && t_exit > 0.0 && t_enter < max_dist) {
-        let t_start = max(t_enter, 0.0);
-        let p_start = ro + rd * (t_start + 1e-4);
-
-        let sx = i32(params.grid_size.x);
-        let sy = i32(params.grid_size.y);
-        let sz = i32(params.grid_size.z);
-
-        var map_pos = clamp(
-            vec3<i32>(floor(p_start)),
-            vec3<i32>(0),
-            vec3<i32>(sx - 1, sy - 1, sz - 1)
-        );
-
-        let step = select(vec3<i32>(-1), vec3<i32>(1), rd >= vec3<f32>(0.0));
-        let inv_abs = 1.0 / max(abs(rd), vec3<f32>(1e-6));
-        let next_b = vec3<f32>(map_pos) + select(vec3<f32>(0.0), vec3<f32>(1.0), rd >= vec3<f32>(0.0));
-        var t_max = vec3<f32>(t_start) + abs(next_b - p_start) * inv_abs;
-        let t_delta = inv_abs;
-
-        var n = vec3<f32>(0.0);
-        let axis = i32(box_hit.z);
-        if (axis == 0) {
-            n = vec3<f32>(-f32(step.x), 0.0, 0.0);
-        } else if (axis == 1) {
-            n = vec3<f32>(0.0, -f32(step.y), 0.0);
-        } else {
-            n = vec3<f32>(0.0, 0.0, -f32(step.z));
+    let count = params.grid_size.x;
+    for (var k: u32 = 0u; k < count; k = k + 1u) {
+        let inst = instances[k];
+        let box = intersect_aabb(ro, rd, inst.bmin.xyz, inst.bmax.xyz);
+        if (box.x > box.y || box.y <= 0.0 || box.x >= result.t) {
+            continue;
         }
-
-        var t_cur = t_start;
-        for (var i: u32 = 0u; i < 768u; i = i + 1u) {
-            if (map_pos.x < 0 || map_pos.y < 0 || map_pos.z < 0 ||
-                map_pos.x >= sx || map_pos.y >= sy || map_pos.z >= sz ||
-                t_cur > max_dist) {
-                break;
-            }
-            let c = get_voxel(map_pos.x, map_pos.y, map_pos.z);
-            if (c != 0u && c != ignore_color) {
-                result.hit = true;
-                result.is_ground = false;
-                result.t = t_cur;
-                result.voxel_color = c;
-                result.normal = n;
-                result.pos = ro + rd * t_cur;
-                break;
-            }
-            if (t_max.x < t_max.y) {
-                if (t_max.x < t_max.z) {
-                    map_pos.x += step.x;
-                    t_cur = t_max.x;
-                    t_max.x += t_delta.x;
-                    n = vec3<f32>(-f32(step.x), 0.0, 0.0);
-                } else {
-                    map_pos.z += step.z;
-                    t_cur = t_max.z;
-                    t_max.z += t_delta.z;
-                    n = vec3<f32>(0.0, 0.0, -f32(step.z));
-                }
-            } else if (t_max.y < t_max.z) {
-                map_pos.y += step.y;
-                t_cur = t_max.y;
-                t_max.y += t_delta.y;
-                n = vec3<f32>(0.0, -f32(step.y), 0.0);
-            } else {
-                map_pos.z += step.z;
-                t_cur = t_max.z;
-                t_max.z += t_delta.z;
-                n = vec3<f32>(0.0, 0.0, -f32(step.z));
-            }
+        let h = trace_instance(inst, ro, rd, result.t);
+        if (h.hit && h.t < result.t && h.voxel_color != ignore_color) {
+            result = h;
         }
     }
 

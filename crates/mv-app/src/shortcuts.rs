@@ -136,7 +136,7 @@ impl MagicaVoxelApp {
 
             // Camera shortcuts (4 / F4 recenter, 5 / F5 90-deg view, 7 / F7 save, 8 / F8 load)
             if !cmd && (i.key_pressed(Key::Num4) || i.key_pressed(Key::F4)) {
-                if world {
+                if world || self.mode == ViewportMode::PathTracer {
                     self.frame_world_camera();
                 } else {
                     self.camera.recenter(&self.project.grid);

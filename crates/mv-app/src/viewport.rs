@@ -3,7 +3,7 @@ use std::collections::HashSet;
 use eframe::egui::{self, Color32, ColorImage, Key, PointerButton, Sense, TextureOptions};
 use glam::Vec2;
 use mv_core::{BrushAction, BrushMode};
-use mv_render::{pick_voxel, render_viewport_rgba};
+use mv_render::{pick_voxel, pick_world, render_viewport_rgba, Highlight, WorldView};
 
 use crate::app::{MagicaVoxelApp, ViewportMode};
 
@@ -67,24 +67,42 @@ impl MagicaVoxelApp {
                             self.camera.ray_for_ndc(Vec2::new(ndc_x, ndc_y), aspect);
                         let allow_ground = self.mode == ViewportMode::ModelEditor
                             && self.project.brush.action == BrushAction::Attach;
-                        self.hovered_hit =
-                            pick_voxel(&self.project.grid, ray_o, ray_d, allow_ground);
+                        if self.mode == ViewportMode::ModelEditor {
+                            self.hovered_hit =
+                                pick_voxel(&self.project.grid, ray_o, ray_d, allow_ground);
+                        }
                     }
 
                     if self.mode == ViewportMode::PathTracer {
                         // Renderer interactions (`mv_controls.html`: LButton = pick DOF focus, ALT+LButton = pick material)
-                        if !space_down && response.clicked_by(PointerButton::Primary) {
-                            if let Some(hit) = self.hovered_hit {
+                        // The renderer shows the whole scene: pick in world space.
+                        let world_hit = if !space_down
+                            && response.clicked_by(PointerButton::Primary)
+                        {
+                            response.interact_pointer_pos().and_then(|p| {
+                                let ndc = Vec2::new(
+                                    ((p.x - rect.left()) / rect.width()) * 2.0 - 1.0,
+                                    1.0 - ((p.y - rect.top()) / rect.height()) * 2.0,
+                                );
+                                let view =
+                                    WorldView::build(&self.project, |_| (Highlight::None, false));
+                                pick_world(&view, &self.camera, ndc, aspect).map(|h| {
+                                    let c = view.instances[h.instance]
+                                        .grid
+                                        .get_i32(h.voxel.x, h.voxel.y, h.voxel.z);
+                                    (h, c)
+                                })
+                            })
+                        } else {
+                            None
+                        };
+                        {
+                            if let Some((hit, color)) = world_hit {
                                 if x_down {
                                     self.camera.target = hit.hit_pos;
-                                } else if alt_down && !hit.is_ground {
-                                    let c = self.project.grid.get_i32(
-                                        hit.voxel.x,
-                                        hit.voxel.y,
-                                        hit.voxel.z,
-                                    );
-                                    if c != 0 {
-                                        self.project.palette.selected = c;
+                                } else if alt_down {
+                                    if color != 0 {
+                                        self.project.palette.selected = color;
                                     }
                                 } else {
                                     self.pt_settings.focus_dist = hit.t.max(1.0);

@@ -88,7 +88,7 @@ Aucune dépendance graphique ni I/O disque : 100 % pur Rust et math (`glam`).
   - `MATL` : flottants écrits en représentation exacte (`{}`), `_ior` stocké en **`ior - 1`** (convention MagicaVoxel), ids `1..=255` seulement. Tous les champs de `Material` sont lus/écrits (`_weight`, `_rough`, `_spec`, `_ior`, `_att`, `_flux`, `_emit`, `_ldr`, `_metal`, `_alpha`/`_trans`, `_d` pour la densité). Seuls les matériaux différents du défaut sont écrits.
   - **Subtilité du format `.vox` pour `RGBA` :** Dans la spécification `.vox` d'Ephtracy, l'entrée `0` du chunk `RGBA` stocke la couleur d'index `1` de la palette (et ainsi de suite de `0..254` -> `1..255`). Ce décalage est déjà géré dans `mv-format`.
   - [`src/mesh.rs`](file:///Users/robbie/Code/magicavoxel/crates/mv-format/src/mesh.rs) : `greedy_quads` (greedy meshing 2D par tranche, quads CCW vus de l'extérieur, axes MagicaVoxel), partagé par les exports.
-  - `export_obj_greedy` : export Wavefront `.obj` du modèle édité ; conversion d'axes **`(x, y, z) -> (x, z, -y)`** (rotation, pas de miroir).
+  - `export_obj_greedy` / `export_ply_point_cloud` : **scène visible** (un `o` par shape, positions monde via `placed.rs`) ; conversion d'axes OBJ **`(x, y, z) -> (x, z, -y)`** ; ordre des sommets inversé pour les rotations miroir (`Rotation::is_mirror`).
   - [`src/gltf.rs`](file:///Users/robbie/Code/magicavoxel/crates/mv-format/src/gltf.rs) : export glTF 2.0 de **toute la scène** (`to_gltf` construit un document typé testable, puis `to_glb_bytes` / `to_gltf_json`). Matrices de nœuds `[R | t + n(R)]` (même convention que le rendu monde ; ces décalages se composent exactement le long de la hiérarchie).
   - `export_ply_point_cloud` : export `.ply` des voxels de surface visibles.
   - `export_slice_png` : export d'une bande PNG 2D de taille `(size_x, size_y * size_z)`.
@@ -102,7 +102,7 @@ Aucune dépendance graphique ni I/O disque : 100 % pur Rust et math (`glam`).
   - `render_viewport_rgba` : rendu temps réel pour le **Model Editor** (parallélisé sur CPU avec `rayon`, incluant Ambient Occlusion analytique par coin de voxel, arêtes, grille `z=0`, cadre englobant, ombres portées et surbrillance de sélection/aperçu brush).
 - [`src/gpu_pathtracer.rs`](file:///Users/robbie/Code/magicavoxel/crates/mv-render/src/gpu_pathtracer.rs) & [`src/pathtrace.wgsl`](file:///Users/robbie/Code/magicavoxel/crates/mv-render/src/pathtrace.wgsl) :
   - `PathTracerEngine` : pipeline Compute `wgpu` exécutant `pathtrace.wgsl` par workgroups de `8x8`.
-  - **Détail d'implémentation WGSL :** WGSL ne supportant pas le type `u8` dans les storage buffers, les voxels de la `VoxelGrid` sont packés par 4 octets dans chaque `u32` (`voxels_packed: array<u32>`) et dépackés dans `get_voxel(x, y, z)` via décalage de bits.
+  - **Toute la scène est rendue** (frame courante, objets/calques cachés exclus) via une structure à deux niveaux : `pack_scene` concatène les grilles des modèles visibles (packées 4 voxels par `u32`, chaque modèle aligné sur un mot, un seul exemplaire par modèle partagé) et écrit un `GpuInstance` par objet (matrice inverse, décalage, AABB monde, taille, adresse). `trace_scene` (WGSL) teste l'AABB de chaque instance puis `trace_instance` fait le DDA en espace local. Les données viennent de `WorldView` (même convention de placement que le viewport World).
   - `VoxelGrid::revision()` : identifiant unique global du contenu, renouvelé par **chaque** méthode `&mut self` (et par toute nouvelle grille). Tout nouveau mutateur de `VoxelGrid` doit le renouveler (`self.revision = next_grid_revision()`).
   - Tout changement de caméra, de paramètres de rendu (`PathTracerSettings`), de voxels (via `revision()`, sans hacher la grille) ou de matériaux est détecté par hachage (`compute_scene_hash` / `compute_camera_and_settings_hash`) et remet automatiquement `current_samples` à `0`.
   - Inclut un fallback CPU automatique si aucun adaptateur GPU n'est disponible (ex: CI headless).
@@ -164,4 +164,3 @@ Lorsque tu reprends le projet, voici les deux chantiers principaux décrits dans
    - Dessiner un **View Cube 3D** interactif dans le coin supérieur droit du viewport.
    - Gérer les événements `ctx.input(|i| i.raw.dropped_files)` dans `mv-app` pour ouvrir un fichier `.vox` par simple **Drag & Drop**.
    - Ajouter une sauvegarde automatique dans `cache/backup.vox` toutes les 25 modifications.
-

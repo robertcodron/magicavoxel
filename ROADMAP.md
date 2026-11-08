@@ -78,9 +78,13 @@
 - [ ] **Reste à faire (World Editor)** :
   - Gizmos 3D de translation/rotation à la souris, `Ctrl+LButton` (déplacer sur une surface), Pattern Library.
   - Copier/instancier un groupe entier (seules les shapes sont copiables aujourd'hui).
-  - Path Tracer sur la scène entière (il rend actuellement le modèle actif seul).
+  - ~~Path Tracer sur la scène entière~~ : fait (voir Accélération spatiale).
+- [x] **Path Tracer et exports sur toute la scène** :
+  - Structure à deux niveaux dans `pathtrace.wgsl` : modèles concaténés (un seul exemplaire par modèle partagé) + buffer d'instances (matrice inverse, décalage, AABB monde) ; chaque rayon teste l'AABB de chaque instance puis parcourt la grille du modèle en espace local. Repli CPU via `WorldView`.
+  - Mode Render en coordonnées monde (cadrage sur l'objet édité, `F4` = scène, mise au point DOF et pipette par picking monde).
+  - Exports `.obj` (un objet par shape, faces correctement orientées même pour les rotations miroir) et `.ply` sur la scène visible ; la bande PNG reste par modèle.
 - [ ] **Accélération Spatiale** :
-  - Rendu monde actuel : test AABB linéaire par shape (~36 ms/frame pour 104 objets en `render_scale` 2). Ajouter une BVH CPU puis GPU.
+  - Rendu monde (CPU et GPU) : test AABB linéaire par instance (~36 ms/frame CPU pour 104 objets en `render_scale` 2). Ajouter une BVH sur les instances.
   - Traversée BVH / Sparse Voxel Octree (ou grille de briques à 2 niveaux) dans `mv-render` pour tracer des dizaines d'instances sans les fusionner dans une grille dense unique.
 
 ### ⏳ Phase 7 : Animation, Voxel Shaders GLSL/WGSL Externes & Finitions Avancées

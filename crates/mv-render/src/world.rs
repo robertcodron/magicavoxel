@@ -28,10 +28,10 @@ pub enum Highlight {
 pub struct WorldInstance<'a> {
     pub node: NodeId,
     pub grid: &'a VoxelGrid,
-    rotation: Rotation,
-    inverse: Rotation,
+    pub(crate) rotation: Rotation,
+    pub(crate) inverse: Rotation,
     /// `world = rotation * p + offset` for continuous model-space points `p`.
-    offset: Vec3,
+    pub(crate) offset: Vec3,
     pub min: Vec3,
     pub max: Vec3,
     pub highlight: Highlight,
@@ -78,10 +78,7 @@ impl<'a> WorldView<'a> {
             if !scene.is_visible(shape) {
                 continue;
             }
-            let Some(grid) = scene
-                .shape_model(shape)
-                .and_then(|m| project.model(m))
-            else {
+            let Some(grid) = scene.shape_model(shape).and_then(|m| project.model(m)) else {
                 continue;
             };
             let Ok(xf) = scene.shape_voxel_transform(shape) else {

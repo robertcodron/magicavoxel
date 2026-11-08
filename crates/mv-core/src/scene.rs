@@ -125,6 +125,14 @@ impl Rotation {
         out
     }
 
+    /// Determinant −1 (the rotation includes a reflection): triangle winding flips.
+    pub fn is_mirror(self) -> bool {
+        let [a, b, c] = self.idx;
+        let inversions = (a > b) as u8 + (a > c) as u8 + (b > c) as u8;
+        let negations = self.neg.iter().filter(|&&n| n).count() as u8;
+        (inversions + negations) % 2 == 1
+    }
+
     pub fn inverse(self) -> Self {
         let mut out = Self::IDENTITY;
         for i in 0..3 {
@@ -1173,5 +1181,19 @@ mod tests {
             !scene.remove_frame(s, 0).unwrap(),
             "keeps at least one frame"
         );
+    }
+
+    #[test]
+    fn mirror_detection_matches_determinant() {
+        for b in 0u8..128 {
+            let r = Rotation::from_vox_byte(b);
+            if r.to_vox_byte() != b {
+                continue;
+            }
+            let c = |v: IVec3| r.apply(v).as_vec3();
+            let det = c(IVec3::X).dot(c(IVec3::Y).cross(c(IVec3::Z)));
+            assert_eq!(r.is_mirror(), det < 0.0, "byte {b}");
+        }
+        assert!(!Rotation::rot90(Axis::Z).is_mirror());
     }
 }
