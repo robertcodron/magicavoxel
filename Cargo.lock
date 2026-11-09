@@ -1906,6 +1906,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "mv-mcp"
+version = "0.1.0"
+dependencies = [
+ "glam",
+ "image",
+ "mv-core",
+ "mv-format",
+ "mv-render",
+]
+
+[[package]]
 name = "mv-render"
 version = "0.1.0"
 dependencies = [

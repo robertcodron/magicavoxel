@@ -1,0 +1,19 @@
+[package]
+name = "mv-mcp"
+version.workspace = true
+edition.workspace = true
+
+[lib]
+path = "src/lib.rs"
+
+[[bin]]
+name = "mv-mcp"
+path = "src/main.rs"
+
+[dependencies]
+mv-core = { path = "../mv-core" }
+mv-format = { path = "../mv-format" }
+mv-render = { path = "../mv-render" }
+glam.workspace = true
+image.workspace = true
+

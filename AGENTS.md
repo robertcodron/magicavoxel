@@ -13,6 +13,17 @@ Ce document contient tout le contexte architectural, les conventions techniques 
   - [`docs/mv_commands.html`](file:///Users/robbie/Code/magicavoxel/docs/mv_commands.html) : Spécification officielle des commandes de la console (`TAB` / `F1`).
   - [`docs/mv_controls.html`](file:///Users/robbie/Code/magicavoxel/docs/mv_controls.html) : Spécification officielle de tous les raccourcis clavier, modes de caméra, brushes (`V/F/B/L/C/P`) et symétries.
   - [`docs/mv_renderer.html`](file:///Users/robbie/Code/magicavoxel/docs/mv_renderer.html) : Spécification du Path Tracer et des formats supportés.
+- **Usage par des IA (MCP) :** les assistants IA peuvent créer des objets et des scènes voxel via le serveur MCP `mv-mcp` (crate `crates/mv-mcp`, voir §3.5).
+
+> [!IMPORTANT]
+> **Règle de parité MCP — toute nouvelle fonctionnalité doit être accessible par le MCP.**
+> Dès qu'une fonctionnalité utilisateur est ajoutée ou modifiée dans l'éditeur (outil, commande, panneau, import/export, rendu, animation, scène, matériaux…), elle doit être utilisable par une IA dans le **même** changement, sinon le travail est incomplet :
+> 1. **Commande console** (`mv-core/src/command.rs`) : déjà accessible via l'outil MCP `console_command`, rien d'autre à faire (mais documenter la commande).
+> 2. **Fonction du noyau sans commande console** (nouvelle opération sur la grille, la scène, la palette, les matériaux, un export…) : ajouter un **outil MCP dédié** (ou une nouvelle `action` d'un outil existant) dans `crates/mv-mcp/src/tools/`, avec ses tests.
+> 3. **Fonction purement visuelle de l'UI** (disposition des panneaux, View Cube…) : exemptée, mais si elle change l'état du projet, de la caméra ou du rendu, exposer cet état (outil `camera`, `project_info`…).
+> 4. Mettre à jour le tableau des outils du [`README.md`](file:///Users/robbie/Code/magicavoxel/README.md) et la liste de la §3.5.
+> Les outils MCP appellent le **noyau** (`mv-core`, `mv-format`, `mv-render`), jamais `mv-app` : la logique d'une fonctionnalité doit donc vivre dans le noyau pour servir l'UI et le MCP.
+
 - **Feuille de route :** Voir [`ROADMAP.md`](file:///Users/robbie/Code/magicavoxel/ROADMAP.md) pour le suivi détaillé des phases terminées (Phases 1, 2, 3, 4, 6) et des phases restantes (Phases 5 et 7).
 
 ---
@@ -23,7 +34,10 @@ Ce document contient tout le contexte architectural, les conventions techniques 
 # Compiler et lancer l'application Desktop (toujours privilégier --release pour la fluidité 3D)
 cargo run --release -p mv-app
 
-# Exécuter l'ensemble des tests unitaires du workspace (mv-core, mv-format, mv-render)
+# Compiler le serveur MCP pour les IA (stdio, voir §3.5)
+cargo build --release -p mv-mcp
+
+# Exécuter l'ensemble des tests unitaires du workspace (mv-core, mv-format, mv-render, mv-mcp, mv-app)
 cargo test --workspace
 
 # Vérifier la compilation rapide sans lancer de binaire
@@ -133,6 +147,20 @@ Aucune dépendance graphique ni I/O disque : 100 % pur Rust et math (`glam`).
 
 ---
 
+### 3.5 `crates/mv-mcp` (Serveur MCP pour les IA)
+Serveur **MCP** (*Model Context Protocol*) sur stdio : JSON-RPC 2.0, un message par ligne (`mv-mcp --help` pour l'enregistrer dans un client). **Aucune dépendance externe** (JSON, base64 et protocole faits maison pour rester compatible `rustc 1.87.0`).
+- [`src/session.rs`](file:///Users/robbie/Code/magicavoxel/crates/mv-mcp/src/session.rs) : `McpSession` (un `EditorProject` + caméra + moteurs de rendu/shaders créés à la demande) et `handle_jsonrpc` (`initialize`, `ping`, `tools/list`, `tools/call`, `resources/*`, `prompts/*`). Un échec d'outil renvoie `isError: true`, jamais une erreur de protocole.
+- [`src/json.rs`](file:///Users/robbie/Code/magicavoxel/crates/mv-mcp/src/json.rs) : `JsonValue` (parseur, sérialiseur, `base64_encode`).
+- [`src/primitives.rs`](file:///Users/robbie/Code/magicavoxel/crates/mv-mcp/src/primitives.rs) : formes (`draw_box`, `draw_ellipsoid`, `draw_cylinder`, `draw_pyramid`, `draw_torus`, `draw_line`, `replace_color`) et `execute_batch_op` (opérations de `voxel_batch`). **Toutes les boucles sont bornées au canevas** (coût ≤ 256³ quelle que soit la taille demandée) et les nombres au-delà de `MAX_COORD` sont refusés : ne pas réintroduire de boucle sur la forme demandée sans la clipper.
+- [`src/tools/`](file:///Users/robbie/Code/magicavoxel/crates/mv-mcp/src/tools/mod.rs) : un module par groupe d'outils, chacun exposant `definitions()` (descripteurs MCP + JSON Schema) et `dispatch(session, nom, args) -> Option<ToolResult>` :
+  - `project.rs` : `project_new/open/save/export/info`, `console_command`, `history`.
+  - `voxel.rs` : `voxel_set/box/sphere/cylinder/line/batch/get/clear`, `palette_manage`, `material_manage`.
+  - `scene.rs` : `scene_manage`, `layer_manage`, `animation`, `voxel_shader`.
+  - `render.rs` : `render_preview` (PNG en base64 : modes `model`, `world`, `pathtracer`), `camera`.
+- **Conventions des outils :** chaque appel réussi = **une seule** étape d'undo (modèle : `record_undo()` ; scène : `record_world_undo()`) ; les opérations travaillent sur une copie et ne s'appliquent que si tout réussit (**atomicité**) ; valider les entrées et renvoyer `Err(String)` clair (jamais de panic sur du JSON invalide) ; coordonnées MagicaVoxel `Z`-up ; les descriptions d'outils sont lues par les IA : y décrire précisément les champs.
+- **Ajouter un outil :** `definitions()` + branche dans `dispatch()` du module concerné, puis tests (`McpSession::new()` + `dispatch_tool_call`), puis README. Les noms d'outils doivent rester uniques (test `definitions_*`).
+- **Tests :** `cargo test -p mv-mcp` (unitaires + `tests/protocol.rs` qui lance le vrai binaire). Test de bout en bout manuel : lancer `target/release/mv-mcp` et dialoguer en JSON-RPC (voir `tests/protocol.rs` pour des exemples).
+
 ## 4. Guide pour la Suite du Développement (Phases 5 & 7)
 
 Lorsque tu reprends le projet, voici les deux chantiers principaux décrits dans [`ROADMAP.md`](file:///Users/robbie/Code/magicavoxel/ROADMAP.md) :
@@ -164,3 +192,56 @@ Lorsque tu reprends le projet, voici les deux chantiers principaux décrits dans
    - Dessiner un **View Cube 3D** interactif dans le coin supérieur droit du viewport.
    - Gérer les événements `ctx.input(|i| i.raw.dropped_files)` dans `mv-app` pour ouvrir un fichier `.vox` par simple **Drag & Drop**.
    - Ajouter une sauvegarde automatique dans `cache/backup.vox` toutes les 25 modifications.
+
+---
+
+## 5. Règle Obligatoire : GitNexus comme Mémoire du Projet
+
+> [!IMPORTANT]
+> **Utilisation obligatoire de GitNexus comme mémoire et intelligence de code :**
+> L'utilisation de **GitNexus** (via ses outils MCP `gitnexus_*` et ses ressources `gitnexus://repo/magicavoxel/...`) comme mémoire structurelle et graphe de connaissance du projet est **strictement obligatoire** pour toute exploration, analyse d'impact, refactoring ou modification du code. Maintenez l'index à jour (`npx gitnexus analyze`) après les changements structurels.
+
+<!-- gitnexus:start -->
+# GitNexus — Code Intelligence & Mandatory Project Memory
+
+This project is indexed by GitNexus as **magicavoxel** (1296 symbols, 4061 relationships, 112 execution flows). **Using GitNexus as the project's structural memory is MANDATORY.** Always use the GitNexus MCP tools to understand code, recall architecture/flows, assess impact, and navigate safely.
+
+> If any GitNexus tool warns the index is stale, run `npx gitnexus analyze` in terminal first.
+
+## Always Do
+
+- **MUST use GitNexus as your primary project memory** before searching or modifying the codebase (`gitnexus_query`, `gitnexus_context`, and `gitnexus://repo/magicavoxel/...` resources).
+- **MUST run impact analysis before editing any symbol.** Before modifying a function, class, or method, run `gitnexus_impact({target: "symbolName", direction: "upstream"})` and report the blast radius (direct callers, affected processes, risk level) to the user.
+- **MUST run `gitnexus_detect_changes()` before committing** to verify your changes only affect expected symbols and execution flows.
+- **MUST warn the user** if impact analysis returns HIGH or CRITICAL risk before proceeding with edits.
+- When exploring unfamiliar code, use `gitnexus_query({query: "concept"})` to find execution flows instead of grepping. It returns process-grouped results ranked by relevance.
+- When you need full context on a specific symbol — callers, callees, which execution flows it participates in — use `gitnexus_context({name: "symbolName"})`.
+
+## Never Do
+
+- NEVER edit a function, class, or method without first running `gitnexus_impact` on it.
+- NEVER ignore HIGH or CRITICAL risk warnings from impact analysis.
+- NEVER rename symbols with find-and-replace — use `gitnexus_rename` which understands the call graph.
+- NEVER commit changes without running `gitnexus_detect_changes()` to check affected scope.
+
+## Resources
+
+| Resource | Use for |
+|----------|---------|
+| `gitnexus://repo/magicavoxel/context` | Codebase overview, check index freshness |
+| `gitnexus://repo/magicavoxel/clusters` | All functional areas |
+| `gitnexus://repo/magicavoxel/processes` | All execution flows |
+| `gitnexus://repo/magicavoxel/process/{name}` | Step-by-step execution trace |
+
+## CLI
+
+| Task | Read this skill file |
+|------|---------------------|
+| Understand architecture / "How does X work?" | `.claude/skills/gitnexus/gitnexus-exploring/SKILL.md` |
+| Blast radius / "What breaks if I change X?" | `.claude/skills/gitnexus/gitnexus-impact-analysis/SKILL.md` |
+| Trace bugs / "Why is X failing?" | `.claude/skills/gitnexus/gitnexus-debugging/SKILL.md` |
+| Rename / extract / split / refactor | `.claude/skills/gitnexus/gitnexus-refactoring/SKILL.md` |
+| Tools, resources, schema reference | `.claude/skills/gitnexus/gitnexus-guide/SKILL.md` |
+| Index, status, clean, wiki CLI commands | `.claude/skills/gitnexus/gitnexus-cli/SKILL.md` |
+
+<!-- gitnexus:end -->

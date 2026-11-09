@@ -5,6 +5,7 @@ members = [
     "crates/mv-format",
     "crates/mv-render",
     "crates/mv-app",
+    "crates/mv-mcp",
 ]
 
 [workspace.package]
