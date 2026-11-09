@@ -24,7 +24,7 @@ Ce document contient tout le contexte architectural, les conventions techniques 
 > 4. Mettre à jour le tableau des outils du [`README.md`](file:///Users/robbie/Code/magicavoxel/README.md) et la liste de la §3.5.
 > Les outils MCP appellent le **noyau** (`mv-core`, `mv-format`, `mv-render`), jamais `mv-app` : la logique d'une fonctionnalité doit donc vivre dans le noyau pour servir l'UI et le MCP.
 
-- **Feuille de route :** Voir [`ROADMAP.md`](file:///Users/robbie/Code/magicavoxel/ROADMAP.md) pour le suivi détaillé des phases terminées (Phases 1, 2, 3, 4, 6) et des phases restantes (Phases 5 et 7).
+- **Feuille de route :** Voir [`ROADMAP.md`](file:///Users/robbie/Code/magicavoxel/ROADMAP.md) pour le suivi détaillé des phases terminées (Phases 1, 2, 3, 4, 5, 6) et des phases restantes (Phases 7 et 8).
 
 ---
 
@@ -165,8 +165,8 @@ Serveur **MCP** (*Model Context Protocol*) sur stdio : JSON-RPC 2.0, un message 
 
 Lorsque tu reprends le projet, voici les deux chantiers principaux décrits dans [`ROADMAP.md`](file:///Users/robbie/Code/magicavoxel/ROADMAP.md) :
 
-### Chantier A — Phase 5 : *World Editor* & Graphe de Scène Multi-Objets
-> Points 1, 2 et 3 faits (`scene.rs`, `scene_io.rs`, `world.rs`, `world_editor.rs`). Restent : gizmos 3D, copie de groupes, path tracer de la scène entière, BVH (voir `ROADMAP.md`).
+### Chantier A — Phase 5 : *World Editor* & Graphe de Scène Multi-Objets (✅ Terminé à 100 %)
+> Terminé : graphe de scène complet (`nTRN`, `nGRP`, `nSHP`, `LAYR`), instances et duplicates récursifs de groupes, Gizmos 3D avec axes projetés et plane drag, surface snapping (`Ctrl+LButton`), accélération spatiale BVH (`WorldBvh`), bibliothèque de patterns procéduraux, parité MCP (`scene_manage`).
 
 1. **Créer `crates/mv-core/src/scene.rs`** :
    - Définir `SceneLayer` (8 calques avec `name`, `color`, `hidden`).

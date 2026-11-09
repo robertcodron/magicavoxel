@@ -244,6 +244,14 @@ impl SceneNode {
             NodeKind::Shape { .. } => &[],
         }
     }
+
+    pub fn is_shape(&self) -> bool {
+        matches!(self.kind, NodeKind::Shape { .. })
+    }
+
+    pub fn is_group(&self) -> bool {
+        matches!(self.kind, NodeKind::Group { .. })
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -605,18 +613,58 @@ impl Scene {
             .count()
     }
 
-    /// New shape referencing the same models, same parent and transform (*Reference*).
-    pub fn instantiate(&mut self, shape: NodeId) -> Result<NodeId, SceneError> {
-        let node = self.get(shape)?.clone();
-        let model_id = node.model_id().ok_or(SceneError::NotAShape(shape))?;
+    /// Clone a shape or an entire group hierarchy under the same parent.
+    /// If `duplicate` is true, shapes get their own copies of models (*Duplicate*);
+    /// otherwise they share models (*Reference*).
+    pub fn clone_tree(&mut self, root: NodeId, duplicate: bool) -> Result<NodeId, SceneError> {
+        let node = self.get(root)?.clone();
         let parent = node.parent.unwrap_or(self.root);
-        let id = self.add_shape(parent, model_id, node.transform)?;
-        let new = self.get_mut(id)?;
-        new.kind = node.kind;
-        new.layer_id = node.layer_id;
-        new.name = node.name;
-        new.extra_transform_keys = node.extra_transform_keys;
-        Ok(id)
+        self.clone_subtree(root, parent, duplicate)
+    }
+
+    fn clone_subtree(
+        &mut self,
+        src_id: NodeId,
+        target_parent: NodeId,
+        duplicate: bool,
+    ) -> Result<NodeId, SceneError> {
+        let src = self.get(src_id)?.clone();
+        match &src.kind {
+            NodeKind::Shape { .. } => {
+                let model_id = src.model_id().ok_or(SceneError::NotAShape(src_id))?;
+                let new_id = self.add_shape(target_parent, model_id, src.transform)?;
+                {
+                    let new = self.get_mut(new_id)?;
+                    new.kind = src.kind.clone();
+                    new.layer_id = src.layer_id;
+                    new.name = src.name.clone();
+                    new.extra_transform_keys = src.extra_transform_keys.clone();
+                }
+                if duplicate {
+                    self.convert_reference_to_duplicate(new_id)?;
+                }
+                Ok(new_id)
+            }
+            NodeKind::Group { children } => {
+                let children = children.clone();
+                let new_group = self.add_group(target_parent, src.transform)?;
+                {
+                    let g = self.get_mut(new_group)?;
+                    g.name = src.name.clone();
+                    g.layer_id = src.layer_id;
+                    g.hidden = src.hidden;
+                }
+                for child_id in children {
+                    self.clone_subtree(child_id, new_group, duplicate)?;
+                }
+                Ok(new_group)
+            }
+        }
+    }
+
+    /// New shape or group referencing the same models, same parent and transform (*Reference*).
+    pub fn instantiate(&mut self, id: NodeId) -> Result<NodeId, SceneError> {
+        self.clone_tree(id, false)
     }
 
     /// Longest shape animation in the scene (at least 1 frame).
@@ -663,11 +711,9 @@ impl Scene {
         Ok(true)
     }
 
-    /// New shape with its own copy of the model (*Duplicate*).
-    pub fn duplicate(&mut self, shape: NodeId) -> Result<NodeId, SceneError> {
-        let id = self.instantiate(shape)?;
-        self.convert_reference_to_duplicate(id)?;
-        Ok(id)
+    /// New shape or group with its own copy of the model (*Duplicate*).
+    pub fn duplicate(&mut self, id: NodeId) -> Result<NodeId, SceneError> {
+        self.clone_tree(id, true)
     }
 
     /// `Ctrl+T`: give a shape its own copies of the models it shares with other
@@ -1195,5 +1241,39 @@ mod tests {
             assert_eq!(r.is_mirror(), det < 0.0, "byte {b}");
         }
         assert!(!Rotation::rot90(Axis::Z).is_mirror());
+    }
+
+    #[test]
+    fn group_instantiate_and_duplicate_clone_children() {
+        let mut scene = Scene::new();
+        let m0 = scene.add_model(cube(2, 1));
+        let m1 = scene.add_model(cube(4, 2));
+        let root = scene.root();
+
+        let g0 = scene.add_group(root, Transform::IDENTITY).unwrap();
+        let _s0 = scene.add_shape(g0, m0, Transform::IDENTITY).unwrap();
+        let _s1 = scene.add_shape(g0, m1, Transform::IDENTITY).unwrap();
+
+        // Instantiate group (shapes share models)
+        let g_inst = scene.instantiate(g0).unwrap();
+        assert!(scene.node(g_inst).unwrap().is_group());
+        let children = scene.node(g_inst).unwrap().children().to_vec();
+        assert_eq!(children.len(), 2);
+        assert_eq!(scene.shape_model(children[0]), Some(m0));
+        assert_eq!(scene.shape_model(children[1]), Some(m1));
+        assert_eq!(scene.model_ref_count(m0), 2);
+        assert_eq!(scene.model_ref_count(m1), 2);
+
+        // Duplicate group (shapes get their own unique models)
+        let g_dup = scene.duplicate(g0).unwrap();
+        assert!(scene.node(g_dup).unwrap().is_group());
+        let dup_children = scene.node(g_dup).unwrap().children().to_vec();
+        assert_eq!(dup_children.len(), 2);
+        let dup_m0 = scene.shape_model(dup_children[0]).unwrap();
+        let dup_m1 = scene.shape_model(dup_children[1]).unwrap();
+        assert_ne!(dup_m0, m0);
+        assert_ne!(dup_m1, m1);
+        assert_eq!(scene.models[dup_m0].size_x(), 2);
+        assert_eq!(scene.models[dup_m1].size_x(), 4);
     }
 }

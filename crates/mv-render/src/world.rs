@@ -59,8 +59,124 @@ pub struct WorldHit {
     pub t: f32,
 }
 
+/// Flat Bounding Volume Hierarchy node for spatial acceleration.
+#[derive(Clone, Copy, Debug)]
+pub struct BvhNode {
+    pub min: Vec3,
+    pub max: Vec3,
+    /// If count > 0, leaf node: start index in `instance_indices`.
+    /// If count == 0, internal node: left child index.
+    pub left_or_first: u32,
+    /// Right child index for internal nodes (0 for leaves).
+    pub right: u32,
+    pub count: u32,
+}
+
+/// Acceleration structure for world instance ray casting.
+#[derive(Clone, Debug, Default)]
+pub struct WorldBvh {
+    pub nodes: Vec<BvhNode>,
+    pub instance_indices: Vec<usize>,
+}
+
+impl WorldBvh {
+    pub fn build(instances: &[WorldInstance]) -> Self {
+        if instances.is_empty() {
+            return Self::default();
+        }
+        let mut instance_indices: Vec<usize> = (0..instances.len()).collect();
+        let mut nodes = Vec::with_capacity(instances.len() * 2);
+        Self::build_recursive(instances, &mut instance_indices, 0, instances.len(), &mut nodes);
+        Self {
+            nodes,
+            instance_indices,
+        }
+    }
+
+    fn build_recursive(
+        instances: &[WorldInstance],
+        indices: &mut [usize],
+        start: usize,
+        end: usize,
+        nodes: &mut Vec<BvhNode>,
+    ) -> u32 {
+        let node_idx = nodes.len() as u32;
+        nodes.push(BvhNode {
+            min: Vec3::splat(f32::INFINITY),
+            max: Vec3::splat(f32::NEG_INFINITY),
+            left_or_first: 0,
+            right: 0,
+            count: 0,
+        });
+
+        let count = end - start;
+        let mut min = Vec3::splat(f32::INFINITY);
+        let mut max = Vec3::splat(f32::NEG_INFINITY);
+        for &idx in &indices[start..end] {
+            min = min.min(instances[idx].min);
+            max = max.max(instances[idx].max);
+        }
+
+        if count <= 4 {
+            nodes[node_idx as usize] = BvhNode {
+                min,
+                max,
+                left_or_first: start as u32,
+                right: 0,
+                count: count as u32,
+            };
+            return node_idx;
+        }
+
+        let mut c_min = Vec3::splat(f32::INFINITY);
+        let mut c_max = Vec3::splat(f32::NEG_INFINITY);
+        for &idx in &indices[start..end] {
+            let center = (instances[idx].min + instances[idx].max) * 0.5;
+            c_min = c_min.min(center);
+            c_max = c_max.max(center);
+        }
+
+        let extent = c_max - c_min;
+        let axis = if extent.x >= extent.y && extent.x >= extent.z {
+            0
+        } else if extent.y >= extent.z {
+            1
+        } else {
+            2
+        };
+
+        let mid_split = (c_min[axis] + c_max[axis]) * 0.5;
+        let mut mid = start;
+        for i in start..end {
+            let idx = indices[i];
+            let center = (instances[idx].min[axis] + instances[idx].max[axis]) * 0.5;
+            if center < mid_split {
+                indices.swap(i, mid);
+                mid += 1;
+            }
+        }
+
+        if mid == start || mid == end {
+            mid = start + count / 2;
+        }
+
+        let left = Self::build_recursive(instances, indices, start, mid, nodes);
+        let right = Self::build_recursive(instances, indices, mid, end, nodes);
+
+        nodes[node_idx as usize] = BvhNode {
+            min,
+            max,
+            left_or_first: left,
+            right,
+            count: 0,
+        };
+        node_idx
+    }
+}
+
 pub struct WorldView<'a> {
     pub instances: Vec<WorldInstance<'a>>,
+    pub bvh: WorldBvh,
     /// World boxes outlined on top of the scene (one per selected object or group).
     pub frames: Vec<(Vec3, Vec3)>,
 }
@@ -109,8 +225,10 @@ impl<'a> WorldView<'a> {
                 dimmed,
             });
         }
+        let bvh = WorldBvh::build(&instances);
         Self {
             instances,
+            bvh,
             frames: Vec::new(),
         }
     }
@@ -125,51 +243,130 @@ impl<'a> WorldView<'a> {
         })
     }
 
-    /// Nearest voxel hit along a world ray.
+    /// Nearest voxel hit along a world ray (accelerated by BVH).
     pub fn raycast(&self, origin: Vec3, dir: Vec3, max_t: f32) -> Option<WorldHit> {
+        if self.bvh.nodes.is_empty() {
+            return None;
+        }
+
         let mut best: Option<WorldHit> = None;
-        for (idx, inst) in self.instances.iter().enumerate() {
+        let mut stack = [0u32; 64];
+        let mut stack_ptr = 1;
+        stack[0] = 0;
+
+        while stack_ptr > 0 {
+            stack_ptr -= 1;
+            let node_idx = stack[stack_ptr] as usize;
+            let node = &self.bvh.nodes[node_idx];
+
+            let best_t = best.as_ref().map_or(max_t, |b| b.t);
             let Some((t_enter, t_exit, _)) =
-                intersect_aabb_with_normal(origin, dir, inst.min, inst.max)
+                intersect_aabb_with_normal(origin, dir, node.min, node.max)
             else {
                 continue;
             };
-            let best_t = best.map_or(max_t, |b| b.t);
             if t_exit < 0.0 || t_enter > best_t {
                 continue;
             }
-            let lo = inst.to_local(origin);
-            let ld = inst.inverse.apply_f32(dir);
-            if let Some(hit) = dda_raycast_grid(inst.grid, lo, ld, best_t) {
-                if hit.t < best_t {
-                    best = Some(WorldHit {
-                        instance: idx,
-                        node: inst.node,
-                        voxel: hit.voxel,
-                        normal_local: hit.normal,
-                        normal: inst.rotation.apply(hit.normal),
-                        hit_pos: origin + dir * hit.t,
-                        hit_pos_local: hit.hit_pos,
-                        t: hit.t,
-                    });
+
+            if node.count > 0 {
+                let start = node.left_or_first as usize;
+                let end = start + node.count as usize;
+                for &idx in &self.bvh.instance_indices[start..end] {
+                    let inst = &self.instances[idx];
+                    let curr_best_t = best.as_ref().map_or(max_t, |b| b.t);
+                    let Some((inst_enter, inst_exit, _)) =
+                        intersect_aabb_with_normal(origin, dir, inst.min, inst.max)
+                    else {
+                        continue;
+                    };
+                    if inst_exit < 0.0 || inst_enter > curr_best_t {
+                        continue;
+                    }
+                    let lo = inst.to_local(origin);
+                    let ld = inst.inverse.apply_f32(dir);
+                    if let Some(hit) = dda_raycast_grid(inst.grid, lo, ld, curr_best_t) {
+                        if hit.t < curr_best_t {
+                            best = Some(WorldHit {
+                                instance: idx,
+                                node: inst.node,
+                                voxel: hit.voxel,
+                                normal_local: hit.normal,
+                                normal: inst.rotation.apply(hit.normal),
+                                hit_pos: origin + dir * hit.t,
+                                hit_pos_local: hit.hit_pos,
+                                t: hit.t,
+                            });
+                        }
+                    }
+                }
+            } else {
+                let left = node.left_or_first;
+                let right = node.right;
+                if stack_ptr + 2 < stack.len() {
+                    stack[stack_ptr] = right;
+                    stack_ptr += 1;
+                    stack[stack_ptr] = left;
+                    stack_ptr += 1;
                 }
             }
         }
         best
     }
 
-    /// Whether anything blocks the ray before `max_t` (shadow rays).
+    /// Whether anything blocks the ray before `max_t` (shadow rays, accelerated by BVH).
     pub fn occluded(&self, origin: Vec3, dir: Vec3, max_t: f32) -> bool {
-        self.instances.iter().any(|inst| {
-            match intersect_aabb_with_normal(origin, dir, inst.min, inst.max) {
-                Some((t_enter, t_exit, _)) if t_exit >= 0.0 && t_enter <= max_t => {
-                    let lo = inst.to_local(origin);
-                    let ld = inst.inverse.apply_f32(dir);
-                    dda_raycast_grid(inst.grid, lo, ld, max_t).is_some()
-                }
-                _ => false,
+        if self.bvh.nodes.is_empty() {
+            return false;
+        }
+
+        let mut stack = [0u32; 64];
+        let mut stack_ptr = 1;
+        stack[0] = 0;
+
+        while stack_ptr > 0 {
+            stack_ptr -= 1;
+            let node_idx = stack[stack_ptr] as usize;
+            let node = &self.bvh.nodes[node_idx];
+
+            let Some((t_enter, t_exit, _)) =
+                intersect_aabb_with_normal(origin, dir, node.min, node.max)
+            else {
+                continue;
+            };
+            if t_exit < 0.0 || t_enter > max_t {
+                continue;
             }
-        })
+
+            if node.count > 0 {
+                let start = node.left_or_first as usize;
+                let end = start + node.count as usize;
+                for &idx in &self.bvh.instance_indices[start..end] {
+                    let inst = &self.instances[idx];
+                    if let Some((i_enter, i_exit, _)) =
+                        intersect_aabb_with_normal(origin, dir, inst.min, inst.max)
+                    {
+                        if i_exit >= 0.0 && i_enter <= max_t {
+                            let lo = inst.to_local(origin);
+                            let ld = inst.inverse.apply_f32(dir);
+                            if dda_raycast_grid(inst.grid, lo, ld, max_t).is_some() {
+                                return true;
+                            }
+                        }
+                    }
+                }
+            } else {
+                let left = node.left_or_first;
+                let right = node.right;
+                if stack_ptr + 2 < stack.len() {
+                    stack[stack_ptr] = right;
+                    stack_ptr += 1;
+                    stack[stack_ptr] = left;
+                    stack_ptr += 1;
+                }
+            }
+        }
+        false
     }
 }
 
@@ -470,5 +667,45 @@ mod tests {
             &mut rgba,
         );
         assert_eq!(rgba.len(), 24 * 16 * 4);
+    }
+
+    #[test]
+    fn bvh_many_instances_accel() {
+        let mut project = EditorProject::new_empty(1, 1, 1);
+        project.scene = mv_core::Scene::new();
+        let mut cube = VoxelGrid::new(2, 2, 2);
+        cube.full(3);
+        let m = project.scene.add_model(cube);
+        project.active_model = usize::MAX;
+        let root = project.scene.root();
+
+        // Create a 5x5 grid of instances (25 instances)
+        let mut nodes = Vec::new();
+        for y in 0..5 {
+            for x in 0..5 {
+                let id = project
+                    .scene
+                    .add_shape(
+                        root,
+                        m,
+                        Transform::from_translation(IVec3::new(x * 10, y * 10, 0)),
+                    )
+                    .unwrap();
+                nodes.push(id);
+            }
+        }
+
+        let view = WorldView::build(&project, |_| (Highlight::None, false));
+        assert_eq!(view.instances.len(), 25);
+        assert!(!view.bvh.nodes.is_empty());
+
+        // Raycast over instance (2, 3)
+        let target_x = 20.5;
+        let target_y = 30.5;
+        let hit = view
+            .raycast(Vec3::new(target_x, target_y, 50.0), -Vec3::Z, 100.0)
+            .unwrap();
+        assert_eq!(hit.node, nodes[3 * 5 + 2]);
+        assert_eq!(hit.normal, IVec3::Z);
     }
 }

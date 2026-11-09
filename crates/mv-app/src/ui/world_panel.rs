@@ -58,9 +58,26 @@ impl MagicaVoxelApp {
 
         self.show_outline(ui);
         ui.separator();
+        self.show_patterns(ui);
+        ui.separator();
         self.show_selection_properties(ui);
         ui.separator();
         self.show_layers(ui);
+    }
+
+    fn show_patterns(&mut self, ui: &mut egui::Ui) {
+        ui.heading("Pattern Library");
+        ui.horizontal_wrapped(|ui| {
+            for pattern in &["Arch", "Column", "Stairs", "Wall", "Tree", "Monument"] {
+                if ui
+                    .button(*pattern)
+                    .on_hover_text(format!("Spawn {pattern} prefab into current group"))
+                    .clicked()
+                {
+                    self.spawn_pattern(pattern);
+                }
+            }
+        });
     }
 
     fn show_outline(&mut self, ui: &mut egui::Ui) {

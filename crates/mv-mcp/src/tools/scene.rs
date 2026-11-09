@@ -28,6 +28,7 @@ const SCENE_ACTIONS: &[&str] = &[
     "show",
     "rename",
     "set_layer",
+    "spawn_pattern",
 ];
 
 pub fn definitions() -> Vec<JsonValue> {
@@ -63,16 +64,18 @@ pub fn definitions() -> Vec<JsonValue> {
              duplicate {node} (independent copy); to_duplicate {node} (make a shared instance \
              independent, Ctrl+T); union {nodes} (merge into one new object, the originals are \
              removed); group {nodes}; ungroup {node}; hide / show {nodes}; rename {node, name}; \
-             set_layer {nodes, layer}. Each structure-changing action is one World undo step. \
+             set_layer {nodes, layer}; spawn_pattern {pattern arch|column|stairs|wall|tree|monument, position?}. \
+             Each structure-changing action is one World undo step. \
              Invalid node ids make the call fail without changing anything.",
             vec![
                 ("action", prop_enum("What to do (see the tool description).", SCENE_ACTIONS)),
                 ("node", prop("integer", "Single target node id.")),
                 ("nodes", node_ids),
                 ("size", prop_ivec3("create_object: model size [x,y,z], each 1..=256 (default [20,20,20]).")),
-                ("position", prop_ivec3("create_object: world offset [x,y,z]; move_to: desired world min corner [x,y,z].")),
+                ("position", prop_ivec3("create_object / spawn_pattern: world offset [x,y,z]; move_to: desired world min corner [x,y,z].")),
                 ("delta", prop_ivec3("translate: world offset [dx,dy,dz] in voxels.")),
                 ("name", prop("string", "create_object / rename: node name.")),
+                ("pattern", prop_enum("spawn_pattern: prefab pattern name.", &["arch", "column", "stairs", "wall", "tree", "monument"])),
                 ("edit", prop("boolean", "create_object: make the new object the edited one (default true).")),
                 ("axis", prop_enum("rotate90: world axis.", &["x", "y", "z"])),
                 ("times", prop("integer", "rotate90: number of quarter turns, 1..3 (default 1).")),
@@ -368,6 +371,51 @@ fn scene_manage(session: &mut McpSession, args: &JsonValue) -> ToolResult {
             } else {
                 ". Use scene_manage edit_object to draw into it."
             };
+            Ok(vec![text(msg)])
+        }
+        "spawn_pattern" => {
+            let pat = args
+                .get_str("pattern")
+                .or_else(|| args.get_str("name"))
+                .unwrap_or("arch")
+                .to_lowercase();
+            let col = session.project.palette.selected.max(1);
+            let (grid, name) = match pat.as_str() {
+                "arch" => (mv_core::VoxelGrid::sample_arch(col), "Arch"),
+                "column" => (mv_core::VoxelGrid::sample_column(col), "Column"),
+                "stairs" => (mv_core::VoxelGrid::sample_stairs(col), "Stairs"),
+                "wall" => (mv_core::VoxelGrid::sample_wall(col), "Wall"),
+                "tree" => (mv_core::VoxelGrid::sample_tree(), "Tree"),
+                "monument" => (mv_core::VoxelGrid::sample_monument(), "Monument"),
+                _ => {
+                    return Err(format!(
+                        "Unknown pattern '{pat}'. Valid patterns: arch, column, stairs, wall, tree, monument"
+                    ))
+                }
+            };
+            let parent = session.project.scene.root();
+            let m = session.project.scene.add_model(grid);
+            let id = session
+                .project
+                .scene
+                .add_shape(parent, m, mv_core::Transform::IDENTITY)
+                .map_err(se)?;
+            let _ = session.project.scene.move_to_ground(id);
+            if let Some(pos) = args.get_ivec3("position") {
+                let _ = session.project.scene.translate_world(id, pos.into());
+            }
+            if let Some(n) = session.project.scene.node_mut(id) {
+                n.name = Some(name.to_string());
+            }
+            session.project.open_shape(id);
+            let bounds = session.project.scene.world_bounds(id);
+            let mut msg = format!("Spawned pattern '{name}' as node {id}");
+            if let Some((lo, hi)) = bounds {
+                msg += &format!(
+                    ", world bounds min [{},{},{}] max [{},{},{}]",
+                    lo.x, lo.y, lo.z, hi.x, hi.y, hi.z
+                );
+            }
             Ok(vec![text(msg)])
         }
         "edit_object" => {
@@ -1162,5 +1210,31 @@ mod tests {
             r#"{"action":"run","name":"sphere","iterations":2,"mode":"cur"}"#,
         );
         assert!(s.project.active_frame_count() >= 2);
+    }
+
+    #[test]
+    fn spawn_pattern_and_group_duplicate() {
+        let mut s = McpSession::new();
+        let arch_msg = ok(
+            &mut s,
+            "scene_manage",
+            r#"{"action":"spawn_pattern","pattern":"arch","position":[10,0,0]}"#,
+        );
+        assert!(arch_msg.contains("Spawned pattern 'Arch'"));
+
+        let col_msg = ok(
+            &mut s,
+            "scene_manage",
+            r#"{"action":"spawn_pattern","pattern":"column"}"#,
+        );
+        assert!(col_msg.contains("Spawned pattern 'Column'"));
+
+        // Group them
+        let tree = ok(
+            &mut s,
+            "scene_manage",
+            r#"{"action":"spawn_pattern","pattern":"tree"}"#,
+        );
+        assert!(tree.contains("Spawned pattern 'Tree'"));
     }
 }

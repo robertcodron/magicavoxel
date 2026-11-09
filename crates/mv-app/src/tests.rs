@@ -795,6 +795,41 @@ fn render_mode_shows_the_whole_scene() {
     assert!((h.app.pt_settings.focus_dist - eye.distance(top)).abs() < 1.5);
 }
 
+#[test]
+fn spawn_pattern_and_copy_group_in_world_editor() {
+    let mut h = Harness::new(EditorProject::new_empty(2, 2, 2));
+    h.key(Key::Tab);
+
+    // Spawn pattern arch
+    h.app.spawn_pattern("Arch");
+    h.step();
+    assert_eq!(h.app.world.selection.len(), 1);
+    let arch_id = *h.app.world.selection.iter().next().unwrap();
+    assert_eq!(
+        h.app.project.scene.node(arch_id).unwrap().name.as_deref(),
+        Some("Arch")
+    );
+
+    // Group it
+    h.app.world_group();
+    h.step();
+    assert_eq!(h.app.world.selection.len(), 1);
+    let group_id = *h.app.world.selection.iter().next().unwrap();
+    assert!(h.app.project.scene.node(group_id).unwrap().is_group());
+
+    // Duplicate the group (cloning group + children with unique models)
+    h.app.world_copy(true);
+    h.step();
+    assert_eq!(h.app.world.selection.len(), 1);
+    let dup_group = *h.app.world.selection.iter().next().unwrap();
+    assert_ne!(dup_group, group_id);
+    assert!(h.app.project.scene.node(dup_group).unwrap().is_group());
+    assert_eq!(
+        h.app.project.scene.node(dup_group).unwrap().children().len(),
+        1
+    );
+}
+
 /// Manual visual check: `VOX_IN=scene.vox PNG_OUT=out.png cargo test -p mv-app
 /// world_snapshot -- --ignored` renders the World Editor viewport of a file to a PNG.
 #[test]

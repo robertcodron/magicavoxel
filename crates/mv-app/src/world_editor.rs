@@ -9,7 +9,7 @@
 
 use std::collections::{BTreeSet, HashSet};
 
-use eframe::egui::{self, PointerButton, Response};
+use eframe::egui::{self, Color32, PointerButton, Response};
 use glam::{IVec3, Vec2, Vec3};
 use mv_core::{Axis, NodeId, NodeKind, SceneStructure};
 use mv_render::{pick_world, render_world_rgba, Highlight, WorldView};
@@ -19,11 +19,22 @@ use crate::app::{MagicaVoxelApp, ViewportMode};
 /// Size of a model created with `Ctrl+N`.
 const NEW_OBJECT_SIZE: u32 = 20;
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum GizmoAxis {
+    X,
+    Y,
+    Z,
+    PlaneXY,
+    Surface,
+}
+
 pub(crate) struct WorldDrag {
-    /// Horizontal plane the object slides on (height of the grabbed point).
-    plane_z: f32,
-    start: Vec3,
-    applied: IVec3,
+    pub(crate) axis: GizmoAxis,
+    pub(crate) center: Vec3,
+    pub(crate) start_param: f32,
+    pub(crate) plane_z: f32,
+    pub(crate) start: Vec3,
+    pub(crate) applied: IVec3,
 }
 
 pub(crate) struct WorldEditorState {
@@ -32,6 +43,7 @@ pub(crate) struct WorldEditorState {
     /// Group being edited (`TAB` enters a group, `Shift+TAB` leaves it).
     pub(crate) group: NodeId,
     pub(crate) hover: Option<NodeId>,
+    pub(crate) gizmo_hover: Option<GizmoAxis>,
     pub(crate) drag: Option<WorldDrag>,
     pub(crate) collapsed: HashSet<NodeId>,
     gesture_in_progress: bool,
@@ -46,6 +58,7 @@ impl WorldEditorState {
             selection: BTreeSet::new(),
             group: root,
             hover: None,
+            gizmo_hover: None,
             drag: None,
             collapsed: HashSet::new(),
             gesture_in_progress: false,
@@ -61,6 +74,31 @@ fn dominant_xy_axis(v: Vec3) -> IVec3 {
     } else {
         IVec3::new(0, v.y.signum() as i32, 0)
     }
+}
+
+/// Closest coordinate along `axis_dir` from the ray `(origin, dir)`.
+fn axis_parameter(origin: Vec3, dir: Vec3, center: Vec3, axis_dir: Vec3) -> Option<f32> {
+    let w0 = origin - center;
+    let b = dir.dot(axis_dir);
+    let d = dir.dot(w0);
+    let e = axis_dir.dot(w0);
+    let denom = 1.0 - b * b;
+    if denom.abs() < 1e-4 {
+        return None;
+    }
+    Some((b * d - e) / denom)
+}
+
+/// Distance from point `p` to 2D line segment `(a, b)`.
+fn dist_to_segment(p: egui::Pos2, a: egui::Pos2, b: egui::Pos2) -> f32 {
+    let ab = b - a;
+    let ap = p - a;
+    let len_sq = ab.length_sq();
+    if len_sq < 1e-4 {
+        return (p - a).length();
+    }
+    let t = (ap.dot(ab) / len_sq).clamp(0.0, 1.0);
+    (p - (a + ab * t)).length()
 }
 
 impl MagicaVoxelApp {
@@ -312,6 +350,34 @@ impl MagicaVoxelApp {
         }
     }
 
+    /// Spawn a prefabricated pattern model into the scene.
+    pub(crate) fn spawn_pattern(&mut self, kind: &str) {
+        let group = self.world.group;
+        let col = self.project.palette.selected.max(1);
+        let grid = match kind {
+            "Arch" => mv_core::VoxelGrid::sample_arch(col),
+            "Column" => mv_core::VoxelGrid::sample_column(col),
+            "Stairs" => mv_core::VoxelGrid::sample_stairs(col),
+            "Wall" => mv_core::VoxelGrid::sample_wall(col),
+            "Tree" => mv_core::VoxelGrid::sample_tree(),
+            "Monument" => mv_core::VoxelGrid::sample_monument(),
+            _ => mv_core::VoxelGrid::new(NEW_OBJECT_SIZE, NEW_OBJECT_SIZE, NEW_OBJECT_SIZE),
+        };
+        let m = self.project.scene.add_model(grid);
+        let t = mv_core::Transform::from_translation(self.camera.target.round().as_ivec3());
+        match self.project.scene.add_shape(group, m, t) {
+            Ok(id) => {
+                let _ = self.project.scene.move_to_ground(id);
+                if let Some(n) = self.project.scene.node_mut(id) {
+                    n.name = Some(kind.to_string());
+                }
+                self.world.selection = BTreeSet::from([id]);
+                self.log(format!("Spawned pattern: {kind}"));
+            }
+            Err(e) => self.log(format!("[ERR] Pattern: {e}")),
+        }
+    }
+
     /// `Ctrl+T`: give each selected shape its own copy of a shared model.
     pub(crate) fn world_reference_to_duplicate(&mut self) {
         let mut converted = 0;
@@ -325,8 +391,8 @@ impl MagicaVoxelApp {
         self.log(format!("Converted {converted} reference(s) to duplicate"));
     }
 
-    /// Copy the selected shapes: `duplicate` gives them their own models, otherwise they
-    /// reference the same models (instances).
+    /// Copy the selected objects (shapes or groups): `duplicate` gives them their own models,
+    /// otherwise they reference the same models (instances).
     pub(crate) fn world_copy(&mut self, duplicate: bool) {
         let mut new = BTreeSet::new();
         for id in self.selection_vec() {
@@ -339,7 +405,7 @@ impl MagicaVoxelApp {
                 Ok(n) => {
                     new.insert(n);
                 }
-                Err(e) => self.log(format!("[ERR] Copy: {e} (groups cannot be copied yet)")),
+                Err(e) => self.log(format!("[ERR] Copy: {e}")),
             }
         }
         if !new.is_empty() {
@@ -509,6 +575,19 @@ impl MagicaVoxelApp {
     // Viewport
     // -----------------------------------------------------------------------
 
+    pub(crate) fn selection_bounds(&self) -> Option<(IVec3, IVec3)> {
+        let mut bounds: Option<(IVec3, IVec3)> = None;
+        for &id in &self.world.selection {
+            if let Some((lo, hi)) = self.project.scene.world_bounds(id) {
+                bounds = Some(match bounds {
+                    Some((l, h)) => (l.min(lo), h.max(hi)),
+                    None => (lo, hi),
+                });
+            }
+        }
+        bounds
+    }
+
     /// Picking, selection, drag-move and rendering of the World Editor viewport.
     pub(crate) fn update_world_viewport(
         &mut self,
@@ -520,11 +599,12 @@ impl MagicaVoxelApp {
     ) {
         self.sanitize_world_state();
         let aspect = rect.width() / rect.height().max(1.0);
-        let (space, alt, shift, x_down) = ui.input(|i| {
+        let (space, alt, shift, ctrl, x_down) = ui.input(|i| {
             (
                 i.key_down(egui::Key::Space),
                 i.modifiers.alt,
                 i.modifiers.shift,
+                i.modifiers.ctrl || i.modifiers.command,
                 i.key_down(egui::Key::X),
             )
         });
@@ -537,6 +617,38 @@ impl MagicaVoxelApp {
                     1.0 - ((p.y - rect.top()) / rect.height()) * 2.0,
                 )
             });
+
+        // --- 3D Translation Gizmo layout ---
+        let gizmo_center = self.selection_bounds().map(|(lo, hi)| (lo.as_vec3() + (hi + IVec3::ONE).as_vec3()) * 0.5);
+        let gizmo_len = (self.camera.distance * 0.12).clamp(14.0, 140.0);
+        let to_screen = |world_pos: Vec3| -> Option<egui::Pos2> {
+            let ndc = self.camera.project_to_ndc(world_pos, aspect)?;
+            Some(egui::pos2(
+                rect.left() + (ndc.x + 1.0) * 0.5 * rect.width(),
+                rect.top() + (1.0 - ndc.y) * 0.5 * rect.height(),
+            ))
+        };
+        let s_c = gizmo_center.and_then(to_screen);
+        let s_x = gizmo_center.map(|gc| gc + Vec3::X * gizmo_len).and_then(to_screen);
+        let s_y = gizmo_center.map(|gc| gc + Vec3::Y * gizmo_len).and_then(to_screen);
+        let s_z = gizmo_center.map(|gc| gc + Vec3::Z * gizmo_len).and_then(to_screen);
+
+        let mouse_pos = response.hover_pos().or_else(|| response.interact_pointer_pos());
+        self.world.gizmo_hover = if let (Some(m), Some(sc), Some(sx), Some(sy), Some(sz)) = (mouse_pos, s_c, s_x, s_y, s_z) {
+            if (m - sc).length() <= 12.0 {
+                Some(GizmoAxis::PlaneXY)
+            } else if dist_to_segment(m, sc, sz) <= 8.0 {
+                Some(GizmoAxis::Z)
+            } else if dist_to_segment(m, sc, sy) <= 8.0 {
+                Some(GizmoAxis::Y)
+            } else if dist_to_segment(m, sc, sx) <= 8.0 {
+                Some(GizmoAxis::X)
+            } else {
+                None
+            }
+        } else {
+            None
+        };
 
         // --- Picking (on the scene state at the start of the interaction) ---
         let (hit, hovered_obj) = {
@@ -552,6 +664,10 @@ impl MagicaVoxelApp {
         self.world.hover = hovered_obj;
 
         // --- Clicks ---
+        let axis_hovered = matches!(
+            self.world.gizmo_hover,
+            Some(GizmoAxis::X | GizmoAxis::Y | GizmoAxis::Z)
+        );
         if !space && response.double_clicked_by(PointerButton::Primary) {
             if let Some(obj) = hovered_obj {
                 match self.project.scene.node(obj).map(|n| &n.kind) {
@@ -563,7 +679,7 @@ impl MagicaVoxelApp {
                     None => {}
                 }
             }
-        } else if !space && response.clicked_by(PointerButton::Primary) {
+        } else if !space && response.clicked_by(PointerButton::Primary) && !axis_hovered {
             if x_down {
                 if let Some(h) = hit {
                     self.camera.target = h.hit_pos;
@@ -596,8 +712,12 @@ impl MagicaVoxelApp {
             }
         }
 
-        // --- Drag to move objects on a horizontal plane ---
+        // --- Drag (Gizmo axes, surface snap, or horizontal plane) ---
         let camera = &self.camera;
+        let (ray_o, ray_d) = pointer_ndc
+            .map(|ndc| camera.ray_for_ndc(ndc, aspect))
+            .unwrap_or((Vec3::ZERO, Vec3::ZERO));
+
         let plane_point = |plane_z: f32| -> Option<Vec3> {
             let ndc = pointer_ndc?;
             let (o, d) = camera.ray_for_ndc(ndc, aspect);
@@ -607,29 +727,91 @@ impl MagicaVoxelApp {
             let t = (plane_z - o.z) / d.z;
             (t > 0.0).then(|| o + d * t)
         };
+
         if !space && !alt && response.drag_started_by(PointerButton::Primary) {
-            if let (Some(obj), Some(h)) = (hovered_obj, hit) {
+            if let (Some(axis), Some(gc)) = (self.world.gizmo_hover, gizmo_center) {
+                let start_param = match axis {
+                    GizmoAxis::X => axis_parameter(ray_o, ray_d, gc, Vec3::X).unwrap_or(0.0),
+                    GizmoAxis::Y => axis_parameter(ray_o, ray_d, gc, Vec3::Y).unwrap_or(0.0),
+                    GizmoAxis::Z => axis_parameter(ray_o, ray_d, gc, Vec3::Z).unwrap_or(0.0),
+                    _ => 0.0,
+                };
+                self.world.drag = Some(WorldDrag {
+                    axis,
+                    center: gc,
+                    start_param,
+                    plane_z: gc.z,
+                    start: gc,
+                    applied: IVec3::ZERO,
+                });
+            } else if let (Some(obj), Some(h)) = (hovered_obj, hit) {
                 if !self.world.selection.contains(&obj) {
                     self.world.selection = BTreeSet::from([obj]);
                 }
+                let axis = if ctrl { GizmoAxis::Surface } else { GizmoAxis::PlaneXY };
                 self.world.drag = Some(WorldDrag {
+                    axis,
+                    center: h.hit_pos,
+                    start_param: 0.0,
                     plane_z: h.hit_pos.z,
                     start: h.hit_pos,
                     applied: IVec3::ZERO,
                 });
             }
         }
+
         if let Some(drag) = &self.world.drag {
-            let (plane_z, start, applied) = (drag.plane_z, drag.start, drag.applied);
             if response.dragged_by(PointerButton::Primary) {
-                if let Some(p) = plane_point(plane_z) {
-                    let total = (p - start).round().as_ivec3() * IVec3::new(1, 1, 0);
-                    let diff = total - applied;
-                    if diff != IVec3::ZERO {
-                        self.world_move(diff);
-                        if let Some(d) = &mut self.world.drag {
-                            d.applied = total;
+                let total = match drag.axis {
+                    GizmoAxis::X => {
+                        let p = axis_parameter(ray_o, ray_d, drag.center, Vec3::X).unwrap_or(drag.start_param);
+                        IVec3::new((p - drag.start_param).round() as i32, 0, 0)
+                    }
+                    GizmoAxis::Y => {
+                        let p = axis_parameter(ray_o, ray_d, drag.center, Vec3::Y).unwrap_or(drag.start_param);
+                        IVec3::new(0, (p - drag.start_param).round() as i32, 0)
+                    }
+                    GizmoAxis::Z => {
+                        let p = axis_parameter(ray_o, ray_d, drag.center, Vec3::Z).unwrap_or(drag.start_param);
+                        IVec3::new(0, 0, (p - drag.start_param).round() as i32)
+                    }
+                    GizmoAxis::PlaneXY => {
+                        if let Some(p) = plane_point(drag.plane_z) {
+                            (p - drag.start).round().as_ivec3() * IVec3::new(1, 1, 0)
+                        } else {
+                            drag.applied
                         }
+                    }
+                    GizmoAxis::Surface => {
+                        let selected_roots = self.world.selection.clone();
+                        let scene = &self.project.scene;
+                        let view = WorldView::build(&self.project, |_| (Highlight::None, false));
+                        let non_sel_hit = pointer_ndc.and_then(|ndc| {
+                            let (o, d) = camera.ray_for_ndc(ndc, aspect);
+                            let hit = view.raycast(o, d, 4000.0)?;
+                            let is_sel = selected_roots.iter().any(|&r| scene.is_ancestor_or_self(r, hit.node));
+                            if is_sel {
+                                None
+                            } else {
+                                Some(hit)
+                            }
+                        });
+                        if let Some(sh) = non_sel_hit {
+                            let target = sh.hit_pos + sh.normal.as_vec3() * 0.5;
+                            (target - drag.start).round().as_ivec3()
+                        } else if let Some(p) = plane_point(0.0) {
+                            (p - drag.start).round().as_ivec3() * IVec3::new(1, 1, 0)
+                        } else {
+                            drag.applied
+                        }
+                    }
+                };
+
+                let diff = total - drag.applied;
+                if diff != IVec3::ZERO {
+                    self.world_move(diff);
+                    if let Some(d) = &mut self.world.drag {
+                        d.applied = total;
                     }
                 }
             }
@@ -670,6 +852,49 @@ impl MagicaVoxelApp {
             render_h,
             &mut self.rgba_buffer,
         );
+
+        // --- Draw 3D Translation Gizmo ---
+        if let (Some(sc), Some(sx), Some(sy), Some(sz)) = (s_c, s_x, s_y, s_z) {
+            let painter = ui.painter_at(rect);
+            let active_axis = self.world.drag.as_ref().map(|d| d.axis).or(self.world.gizmo_hover);
+
+            let center_col = if active_axis == Some(GizmoAxis::PlaneXY) {
+                Color32::YELLOW
+            } else {
+                Color32::from_rgba_unmultiplied(220, 220, 220, 200)
+            };
+            painter.circle_stroke(sc, 8.0, egui::Stroke::new(2.5, center_col));
+
+            let x_col = if active_axis == Some(GizmoAxis::X) {
+                Color32::YELLOW
+            } else {
+                Color32::from_rgb(235, 60, 60)
+            };
+            let x_stroke = egui::Stroke::new(if active_axis == Some(GizmoAxis::X) { 4.0 } else { 2.5 }, x_col);
+            painter.line_segment([sc, sx], x_stroke);
+            painter.circle_filled(sx, 5.0, x_col);
+            painter.text(sx + egui::vec2(7.0, -7.0), egui::Align2::LEFT_CENTER, "X", egui::FontId::monospace(12.0), x_col);
+
+            let y_col = if active_axis == Some(GizmoAxis::Y) {
+                Color32::YELLOW
+            } else {
+                Color32::from_rgb(60, 220, 60)
+            };
+            let y_stroke = egui::Stroke::new(if active_axis == Some(GizmoAxis::Y) { 4.0 } else { 2.5 }, y_col);
+            painter.line_segment([sc, sy], y_stroke);
+            painter.circle_filled(sy, 5.0, y_col);
+            painter.text(sy + egui::vec2(7.0, -7.0), egui::Align2::LEFT_CENTER, "Y", egui::FontId::monospace(12.0), y_col);
+
+            let z_col = if active_axis == Some(GizmoAxis::Z) {
+                Color32::YELLOW
+            } else {
+                Color32::from_rgb(60, 150, 255)
+            };
+            let z_stroke = egui::Stroke::new(if active_axis == Some(GizmoAxis::Z) { 4.0 } else { 2.5 }, z_col);
+            painter.line_segment([sc, sz], z_stroke);
+            painter.circle_filled(sz, 5.0, z_col);
+            painter.text(sz + egui::vec2(7.0, -7.0), egui::Align2::LEFT_CENTER, "Z", egui::FontId::monospace(12.0), z_col);
+        }
     }
 
     // -----------------------------------------------------------------------

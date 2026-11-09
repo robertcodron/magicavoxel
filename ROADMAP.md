@@ -9,8 +9,9 @@
 | **Phase 3** | *Model Editor* : Brushes (`V`, `F`, `B`, `L`, `C`, `P`), Actions (`T`, `R`, `G`, `N`), Symétries (`Mirror`, `Axis`) & Sélections | ✅ Terminé | 100 % |
 | **Phase 4** | Moteur de Commandes Console (`docs/mv_commands.html`) & Voxel Shaders intégrés (`xs`) | ✅ Terminé | 100 % |
 | **Phase 6** | *Renderer* : Path Tracer GPU (`wgpu` / WGSL), Matériaux PBR (Metal, Glass, Emit, Cloud), DOF & ACES | ✅ Terminé | 90 % |
-| **Phase 5** | *World Editor* : Graphe de scène multi-objets (`nTRN`, `nGRP`, `nSHP`), Instances, Calques (`LAYR`), Gizmos & Booléens | 🚧 En cours | 80 % |
+| **Phase 5** | *World Editor* : Graphe de scène multi-objets (`nTRN`, `nGRP`, `nSHP`), Instances, Calques (`LAYR`), Gizmos & Booléens | ✅ Terminé | 100 % |
 | **Phase 7** | Timeline d'Animation (`0..360`), Shaders GLSL/WGSL externes (`shaders/`), OIDN Denoiser, Marching Cubes & UI avancée | 🚧 En cours | 50 % |
+| **Phase 8** | **Outils Procéduraux & Ergonomie "Cozy Builder" (Inspirations *Tiny Glade*)** : Gizmos 3D, Smart Brushes, Bâtiments modulaires, Menu Radial, Lanternes & Atmosphère | 📋 Prévue | 0 % |
 
 ---
 
@@ -50,15 +51,10 @@
   - Caméra **Thin-Lens Depth of Field (DOF)** : ouverture `aperture` et mise au point `focus_dist` cliquable directement sur un voxel avec `LButton`.
   - Atmosphère & Post-processing : Soleil directionnel, ciel Rayleigh, brouillard exponentiel, exposition, vignette, **ACES Filmic Tone Mapping** et export PNG (`F6`).
 
----
-
-## Prochaines Phases à Implémenter (⏳)
-
-### ⏳ Phase 5 : Le *World Editor* (Graphe de Scène Multi-Objets & Calques)
-**Objectif :** Supporter des scènes multi-objets hiérarchiques jusqu'à `2048x2048x1024` comme spécifié dans [`docs/mv_main.html`](file:///Users/robbie/Code/magicavoxel/docs/mv_main.html#L584-L603) et [`docs/mv_controls.html`](file:///Users/robbie/Code/magicavoxel/docs/mv_controls.html#L188-L254).
+### ✅ Phase 5 : Le *World Editor* (Graphe de Scène Multi-Objets, Gizmos, Patterns & Accélération BVH)
 - [x] **Graphe de scène (`crates/mv-core/src/scene.rs`)** :
   - `SceneNode` = un `nTRN` + son enfant (`NodeKind::Group` / `NodeKind::Shape { model_id }`), `Transform` (`Rotation` permutation signée encodée comme l'octet `_r`, translation `IVec3`).
-  - Instances partagées (*Reference*, `instantiate`) vs copies (*Duplicate*, `duplicate`, `convert_reference_to_duplicate` pour `Ctrl+T`).
+  - Instances partagées (*Reference*, `instantiate`) vs copies (*Duplicate*, `duplicate`, `convert_reference_to_duplicate` pour `Ctrl+T`), étendu récursivement aux hiérarchies de groupes complètes (`clone_tree`).
   - 8 calques par défaut (`SceneLayer`), visibilité héritée (nœud, ancêtres, calque).
   - Opérations : `world_bounds`, `translate_world`, `move_to_ground` (`G`), `rotate90` (`-`/`+`, axe monde), `union` (`U`), `remove_node`, `compact_models`, `merge_to_grid`.
   - `EditorProject` : `scene` + `active_model` ; `grid` est le modèle en cours d'édition (`set_active_model`, `commit_active_model`, `model()`).
@@ -75,17 +71,25 @@
   - Undo/redo dédié (structure de scène uniquement, une étape par geste).
   - Rendu monde CPU (`crates/mv-render/src/world.rs`) : chaque shape est tracée dans son espace modèle, instances partagées, ombres entre objets, objets hors du groupe courant estompés.
   - Tests d'intégration headless (`crates/mv-app/src/tests.rs`) pilotant de vraies frames egui (clavier, clics, glisser).
-- [ ] **Reste à faire (World Editor)** :
-  - Gizmos 3D de translation/rotation à la souris, `Ctrl+LButton` (déplacer sur une surface), Pattern Library.
-  - Copier/instancier un groupe entier (seules les shapes sont copiables aujourd'hui).
-  - ~~Path Tracer sur la scène entière~~ : fait (voir Accélération spatiale).
+- [x] **Gizmos 3D & Manipulation Directe (`mv-app/src/world_editor.rs`)** :
+  - Gizmos 3D interactifs dans le viewport avec axes projetés (X rouge, Y vert, Z bleu) et plan XY central.
+  - Déplacement contraint par axe ou plan avec projection mathématique rayon-droite 3D exacte.
+  - Aimantation / Snapping aux surfaces d'autres instances de la scène avec `Ctrl + LButton`.
+- [x] **Bibliothèque de Patterns & Préfabriqués (`mv-core/src/voxel.rs`, `mv-app`, `mv-mcp`)** :
+  - Génération de motifs procéduraux d'architecture : Arche (`sample_arch`), Colonne (`sample_column`), Escalier (`sample_stairs`), Mur crénelé (`sample_wall`), Arbre (`sample_tree`), Monument.
+  - Sélecteur de motifs dans le panneau latéral droit du World Editor.
+  - Parité MCP complète : outil `scene_manage (action: "spawn_pattern")`.
 - [x] **Path Tracer et exports sur toute la scène** :
   - Structure à deux niveaux dans `pathtrace.wgsl` : modèles concaténés (un seul exemplaire par modèle partagé) + buffer d'instances (matrice inverse, décalage, AABB monde) ; chaque rayon teste l'AABB de chaque instance puis parcourt la grille du modèle en espace local. Repli CPU via `WorldView`.
   - Mode Render en coordonnées monde (cadrage sur l'objet édité, `F4` = scène, mise au point DOF et pipette par picking monde).
   - Exports `.obj` (un objet par shape, faces correctement orientées même pour les rotations miroir) et `.ply` sur la scène visible ; la bande PNG reste par modèle.
-- [ ] **Accélération Spatiale** :
-  - Rendu monde (CPU et GPU) : test AABB linéaire par instance (~36 ms/frame CPU pour 104 objets en `render_scale` 2). Ajouter une BVH sur les instances.
-  - Traversée BVH / Sparse Voxel Octree (ou grille de briques à 2 niveaux) dans `mv-render` pour tracer des dizaines d'instances sans les fusionner dans une grille dense unique.
+- [x] **Accélération Spatiale BVH (`crates/mv-render/src/world.rs`)** :
+  - Hiérarchie de volumes englobants AABB (`WorldBvh`) avec partitionnement par centroïdes / SAH pour accélérer le raycasting CPU (`WorldView::raycast`) et l'occlusion des ombres (`WorldView::occluded`).
+  - Passage d'une complexité linéaire `O(N)` à une traversée logarithmique `O(log N)` pour les scènes à grand nombre d'instances.
+
+---
+
+## Prochaines Phases à Implémenter (⏳)
 
 ### ⏳ Phase 7 : Animation, Voxel Shaders GLSL/WGSL Externes & Finitions Avancées
 **Objectif :** Compléter les fonctionnalités de production (animation, shaders personnalisés, débruitage IA, imports/exports additionnels).
@@ -121,4 +125,63 @@
   - **Auto-backup** (`backup.rs`) toutes les 25 modifications (`EditorProject::edit_count`) dans `cache/backup.vox`, écrit en arrière-plan (fichier temporaire puis renommage), attendu à la fermeture.
   - **Confirmation des modifications non sauvegardées** (`unsaved.rs`) avant d'ouvrir un autre fichier (dialogue ou glisser-déposer) ou de quitter : Enregistrer / Ne pas enregistrer / Annuler.
 - [ ] **Ergonomie (reste)** : personnalisation des raccourcis via `config/hotkey.txt`, import `.png` par glisser-déposer.
+
+---
+
+### 📋 Phase 8 : Outils Procéduraux & Ergonomie "Cozy Builder" (Inspirations *Tiny Glade*)
+
+**Objectif :** Transposer les concepts majeurs de construction organique, d'interaction directe et d'ambiance poétique de *Tiny Glade* dans l'architecture voxel de `magicavoxel-rs`, avec parité complète UI et MCP.
+
+#### 1. Gizmos 3D de Manipulation Directe dans le Viewport (`mv-render` & `mv-app`)
+- [ ] **Manipulateurs 3D interactifs** :
+  - Gizmo d'axes (flèches X, Y, Z + plans XY, XZ, YZ) pour déplacer directement les objets sélectionnés dans le *World Editor* et les sélections dans le *Model Editor*.
+  - Poignées d'extrusion directe sur les faces de la boîte englobante ou du volume sélectionné (tirer une face agrandit/extrude la grille ou la boîte de voxels en temps réel).
+  - Aimantation intelligente aux surfaces et incrément discret en voxels (`Snap 1/2/4/8`).
+  - **Parité MCP** : outil `gizmo_transform` (translation, extrusion de face, redimensionnement relatif) et commande console `extrude [axis] [amount]`.
+
+#### 2. Brushes Procéduraux Intelligents & Splines de Murs (`mv-core/src/brush.rs`)
+- [ ] **Tracé de murs par Spline 3D** :
+  - Définition de courbes de Bézier / splines Catmull-Rom au sol avec poignées de hauteur locales.
+  - Voxelisation procédurale en continu : génération de murs en maçonnerie de pierre avec crénelages adaptatifs et relief irrégulier.
+- [ ] **Intersections & Raccordements Contextuels ("Smart Snapping")** :
+  - Détection automatique d'intersection entre un sentier/route et un mur : découpe instantanée d'une arche voûtée en pierre ou insertion d'un portillon en bois.
+  - Ajustement dynamique de l'arche lors de la modification de la hauteur du mur adjacent.
+  - **Parité MCP** : outil `smart_brush` (actions `curve_wall`, `smart_arch`, `fence`) et commandes console `wall_spline`, `arch`.
+
+#### 3. Bâtiments Modulaires & Détails Architecturaux Contextuels (`mv-core` & `mv-format`)
+- [ ] **Générateur procédural de toitures** :
+  - Outil de toiture automatique (deux pans, quatre pans / croupe, mansarde, tourelles coniques) s'adaptant à la boîte englobante du bâtiment avec débord de toit et tuiles étagées.
+- [ ] **Perçage & Habillage automatique de baies (Portes, Fenêtres, Lucarnes)** :
+  - Outil fenêtre/porte "aimanté" : perçage automatique de la paroi voxel, génération du cadre, linteau, appui et volets.
+  - Lucarnes de toit (dormers) s'alignant automatiquement sur la pente de la toiture.
+  - Cheminées murales avec panache de fumée particulaire stylisée.
+  - Guirlandes et fanions tendus automatiquement entre façades rapprochées.
+  - **Parité MCP** : outil `architecture_generate` (actions `roof`, `window`, `door`, `chimney`, `dormer`) et commande console `roof <type> [args]`.
+
+#### 4. Menu Radial Contextuel In-Situ ("Pie Menu") (`mv-app/src/ui/radial_menu.rs`)
+- [ ] **Palette & Outils sous le curseur** :
+  - Invocation rapide par clic droit (ou touche dédiée `Espace`) ouvrant une roue radiale circulaire centrée sur la souris.
+  - Sélection circulaire : nuancier de couleurs récemment utilisées, textures/matériaux PBR (Metal, Glass, Emit, Blend) et types de brosses.
+  - Micro-interactions soignées : animation de survol, retour haptique visuel, fermeture fluide dès relâchement ou clic.
+  - Évite les allers-retours incessants entre la vue 3D centrale et les panneaux latéraux.
+
+#### 5. Système de Lanternes & Éclairage Ponctuel Dynamique (`mv-render` & `mv-core`)
+- [ ] **Props lumineux prêts à l'emploi** :
+  - Placement en 1 clic de lanternes murales, lampadaires ou torches voxels qui s'orientent automatiquement selon la normale du mur.
+- [ ] **Sources de lumière ponctuelles (Point Lights)** :
+  - Gestion des point lights locales associées aux lanternes (position, rayon d'action, couleur Kelvin/RGB, intensité/lux).
+  - Intégration dans le Ray-Caster temps réel (ombrage doux de proximité) et dans le Path Tracer GPU (`pathtrace.wgsl` : évaluation analytique des sources ponctuelles avec Next-Event Estimation).
+  - **Parité MCP** : outil `light_manage` (actions `add_lantern`, `set_light_params`, `remove_light`) et commande console `light add|set|del`.
+
+#### 6. Biomes, Eau, Végétation & Presets d'Ambiance Dynamique (`mv-core` & `mv-render`)
+- [ ] **Outils de biome & végétation organique** :
+  - Brosse de sentier : efface l'herbe et remplace la surface par des pavés ou de la terre battue.
+  - Brosse d'étang / eau : creuse la cuvette et remplit d'une nappe d'eau réflective avec nénuphars et joncs procéduraux.
+  - Brosse de flore : peinture de prairies fleuries et feuillages/lierres grimpant naturellement sur les parois verticales.
+  - Génération d'arbres stylisés "boules cotonneuses" en un clic avec tronc et branchages.
+- [ ] **Presets atmosphériques & Rendu cinématique** :
+  - Presets en un clic : *Golden Hour* (soleil couchant rasant chaud), *Midnight Fairytale* (nuit étoilée, croissant de lune, fenêtres intérieures chaleureuses illuminées), *Misty Morning* (brume volumétrique et rosée).
+  - Profondeur de champ cinématique automatique (Thin-Lens Bokeh) avec mise au point sur le sujet actif.
+  - Particules atmosphériques ambiantes (feuilles au vent, lucioles nocturnes).
+  - **Parité MCP** : outil `atmosphere_manage` (presets, fog, lune/soleil, bokeh) et `biome_brush` (sentier, eau, flore).
 

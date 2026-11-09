@@ -164,6 +164,24 @@ impl OrbitCamera {
             .normalize();
         (eye, dir)
     }
+
+    /// Project a 3D point in world space to Normalized Device Coordinates (`[-1, 1]²`).
+    /// Returns `None` if the point is behind the camera.
+    pub fn project_to_ndc(&self, world_pos: Vec3, aspect: f32) -> Option<Vec2> {
+        let (eye, forward, right, up) = self.basis();
+        let v = world_pos - eye;
+        let depth = v.dot(forward);
+        if depth <= 0.05 {
+            return None;
+        }
+        let half_tan = (self.fov_deg.to_radians() * 0.5).tan();
+        if half_tan.abs() < 1e-5 || aspect.abs() < 1e-5 {
+            return None;
+        }
+        let ndc_x = (v.dot(right) / depth) / (aspect * half_tan);
+        let ndc_y = (v.dot(up) / depth) / half_tan;
+        Some(Vec2::new(ndc_x, ndc_y))
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]

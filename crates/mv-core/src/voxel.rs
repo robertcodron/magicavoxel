@@ -922,6 +922,104 @@ impl VoxelGrid {
         }
         grid
     }
+
+    /// Pattern preset: Architectural stone archway
+    pub fn sample_arch(color: u8) -> Self {
+        let mut grid = Self::new(16, 6, 16);
+        let col = color.max(1);
+        for z in 0..16 {
+            for y in 0..6 {
+                for x in 0..16 {
+                    let is_leg = (x < 3 || x >= 13) && z < 11;
+                    let dx = (x as f32 - 7.5).abs();
+                    let dz = z as f32 - 10.0;
+                    let dist = (dx * dx + dz * dz).sqrt();
+                    let is_arch = dz >= 0.0 && dist >= 4.5 && dist <= 7.5;
+                    if is_leg || is_arch {
+                        grid.set(x, y, z, col);
+                    }
+                }
+            }
+        }
+        grid
+    }
+
+    /// Pattern preset: Classical round column with base and capital
+    pub fn sample_column(color: u8) -> Self {
+        let mut grid = Self::new(8, 8, 20);
+        let col = color.max(1);
+        for z in 0..20 {
+            let is_cap = z < 2 || z >= 18;
+            for y in 0..8 {
+                for x in 0..8 {
+                    let dx = x as f32 - 3.5;
+                    let dy = y as f32 - 3.5;
+                    if is_cap || (dx * dx + dy * dy).sqrt() <= 3.2 {
+                        grid.set(x, y, z, col);
+                    }
+                }
+            }
+        }
+        grid
+    }
+
+    /// Pattern preset: Flight of 16 steps
+    pub fn sample_stairs(color: u8) -> Self {
+        let mut grid = Self::new(16, 16, 16);
+        let col = color.max(1);
+        for step in 0..16 {
+            for z in 0..=step {
+                for y in 0..16 {
+                    grid.set(step, y, z, col);
+                }
+            }
+        }
+        grid
+    }
+
+    /// Pattern preset: Crenellated defensive wall section
+    pub fn sample_wall(color: u8) -> Self {
+        let mut grid = Self::new(20, 4, 12);
+        let col = color.max(1);
+        for x in 0..20 {
+            for y in 0..4 {
+                for z in 0..12 {
+                    let is_crenel = z == 11 && (x / 3) % 2 == 1;
+                    if !is_crenel {
+                        grid.set(x, y, z, col);
+                    }
+                }
+            }
+        }
+        grid
+    }
+
+    /// Pattern preset: Stylized tree with wood trunk and foliage
+    pub fn sample_tree() -> Self {
+        let mut grid = Self::new(14, 14, 22);
+        let wood = 16;
+        let foliage = 112;
+        for z in 0..10 {
+            for y in 5..9 {
+                for x in 5..9 {
+                    grid.set(x, y, z, wood);
+                }
+            }
+        }
+        for z in 8..22 {
+            for y in 0..14 {
+                for x in 0..14 {
+                    let dx = x as f32 - 6.5;
+                    let dy = y as f32 - 6.5;
+                    let dz = z as f32 - 15.0;
+                    if (dx * dx + dy * dy + dz * dz).sqrt() <= 6.2 {
+                        grid.set(x, y, z, foliage);
+                    }
+                }
+            }
+        }
+        grid
+    }
 }
 
 #[inline]
