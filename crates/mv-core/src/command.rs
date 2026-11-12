@@ -28,7 +28,7 @@ pub fn execute_console_command(
 
     match cmd.as_str() {
         "help" | "?" => Ok(CommandOutcome::Message(
-            "Commands: sel_all, sel_none, sel_inv, copy, cut, paste, size [x y z], shrink, zero, full, fill, inv, flip [xyz], loop [axis offset], scale [xyz factor], x2, rot [axis deg], rot90 [axis], repeat [xyz factor], mir [axis], dia [axis], dil [axis], ero [axis], flood [idx], noise [seed scale min max], rand [min max], maze [edge], shear [axis s1 s2], pal [mask|fill|bw|mac|sort], log, xs [-n iter] [wave|sphere|torus|gyroid|pyramid|checker|life], o [vox|obj|ply|slice]"
+            "Commands: sel_all, sel_none, sel_inv, copy, cut, paste, size [x y z], shrink, zero, full, fill, inv, flip [xyz], loop [axis offset], scale [xyz factor], x2, rot [axis deg], rot90 [axis], repeat [xyz factor], mir [axis], dia [axis], dil [axis], ero [axis], flood [idx], noise [seed scale min max], rand [min max], maze [edge], shear [axis s1 s2], extrude <axis> <amt>, wall_spline, arch, roof, light <add|list|del|clear>, pond, tree, pal [mask|fill|bw|mac|sort], log, xs [-n iter] [wave|sphere|torus|gyroid|pyramid|checker|life], o [vox|obj|ply|slice]"
                 .to_string(),
         )),
 
@@ -424,6 +424,297 @@ pub fn execute_console_command(
                 run_voxel_shader(grid, &name, &inv.args, c, step.iter)
             })?;
             Ok(CommandOutcome::Message(msg))
+        }
+        "extrude" => {
+            if args.len() < 2 {
+                return Err("Usage: extrude <x|y|z> <amount>".to_string());
+            }
+            let axis = match args[0].to_ascii_lowercase().as_str() {
+                "x" => Axis::X,
+                "y" => Axis::Y,
+                "z" => Axis::Z,
+                _ => return Err("Invalid axis (expected x, y, or z)".to_string()),
+            };
+            let amount: i32 = args[1].parse().map_err(|_| "Invalid amount integer")?;
+            project.record_undo();
+
+            if project.selection.any_selected() {
+                let mut moved = 0;
+                let dir = match axis {
+                    Axis::X => IVec3::new(amount.signum(), 0, 0),
+                    Axis::Y => IVec3::new(0, amount.signum(), 0),
+                    Axis::Z => IVec3::new(0, 0, amount.signum()),
+                };
+                let steps = amount.abs();
+                for step in 1..=steps {
+                    for z in 0..project.grid.size_z() {
+                        for y in 0..project.grid.size_y() {
+                            for x in 0..project.grid.size_x() {
+                                if project.selection.get(x, y, z) {
+                                    let col = project.grid.get(x, y, z);
+                                    if col != 0 {
+                                        let target = IVec3::new(x as i32, y as i32, z as i32) + dir * step;
+                                        if project.grid.in_bounds(target.x, target.y, target.z) {
+                                            project.grid.set_i32(target.x, target.y, target.z, col);
+                                            project.selection.set(
+                                                target.x as u32,
+                                                target.y as u32,
+                                                target.z as u32,
+                                                true,
+                                            );
+                                            moved += 1;
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                Ok(CommandOutcome::Message(format!(
+                    "Extruded selection along {:?} by {} ({} voxels affected)",
+                    axis, amount, moved
+                )))
+            } else {
+                project.grid.extrude(axis, amount);
+                Ok(CommandOutcome::Message(format!(
+                    "Extruded face along {:?} by {}",
+                    axis, amount
+                )))
+            }
+        }
+        "wall_spline" => {
+            if args.len() < 6 {
+                return Err("Usage: wall_spline [color] <thickness> <height> <crenel:0|1> <x0 y0 z0 x1 y1 z1 ...>".to_string());
+            }
+
+            let (color, thickness, height, crenel, pt_start_idx) = if (args.len() - 4) % 3 == 0 {
+                let col: u8 = args[0].parse().map_err(|_| "Invalid color")?;
+                let th: u32 = args[1].parse().map_err(|_| "Invalid thickness")?;
+                let h: u32 = args[2].parse().map_err(|_| "Invalid height")?;
+                let cr = args[3] == "1" || args[3].eq_ignore_ascii_case("true");
+                (col, th, h, cr, 4)
+            } else if args.len() % 3 == 0 {
+                let th: u32 = args[0].parse().map_err(|_| "Invalid thickness")?;
+                let h: u32 = args[1].parse().map_err(|_| "Invalid height")?;
+                let cr = args[2] == "1" || args[2].eq_ignore_ascii_case("true");
+                (project.palette.selected.max(1), th, h, cr, 3)
+            } else {
+                return Err("Invalid point count for wall_spline (coordinates must be x y z triplets)".to_string());
+            };
+
+            let mut pts = Vec::new();
+            let mut i = pt_start_idx;
+            while i + 2 < args.len() {
+                let x: f32 = args[i].parse().map_err(|_| "Invalid point X")?;
+                let y: f32 = args[i + 1].parse().map_err(|_| "Invalid point Y")?;
+                let z: f32 = args[i + 2].parse().map_err(|_| "Invalid point Z")?;
+                pts.push(Vec3::new(x, y, z));
+                i += 3;
+            }
+
+            if pts.len() < 2 {
+                return Err("wall_spline requires at least 2 control points".to_string());
+            }
+
+            project.record_undo();
+            crate::spline::generate_spline_wall(&mut project.grid, &pts, thickness, height, crenel, color);
+            Ok(CommandOutcome::Message(format!(
+                "Generated spline wall (points: {}, thickness: {}, height: {}, crenel: {})",
+                pts.len(), thickness, height, crenel
+            )))
+        }
+        "arch" => {
+            if args.len() < 5 {
+                return Err("Usage: arch <x> <y> <z> <width> <height> [depth] [frame_color]".to_string());
+            }
+            let x: i32 = args[0].parse().map_err(|_| "Invalid x")?;
+            let y: i32 = args[1].parse().map_err(|_| "Invalid y")?;
+            let z: i32 = args[2].parse().map_err(|_| "Invalid z")?;
+            let width: u32 = args[3].parse().map_err(|_| "Invalid width")?;
+            let height: u32 = args[4].parse().map_err(|_| "Invalid height")?;
+            let depth: u32 = if args.len() > 5 {
+                args[5].parse().map_err(|_| "Invalid depth")?
+            } else {
+                2
+            };
+            let frame_color: u8 = if args.len() > 6 {
+                args[6].parse().map_err(|_| "Invalid frame color")?
+            } else {
+                project.palette.selected.max(1)
+            };
+
+            project.record_undo();
+            crate::spline::carve_arch(
+                &mut project.grid,
+                IVec3::new(x, y, z),
+                width,
+                height,
+                depth,
+                frame_color,
+            );
+            Ok(CommandOutcome::Message(format!(
+                "Carved arch at ({}, {}, {}) width: {} height: {} depth: {}",
+                x, y, z, width, height, depth
+            )))
+        }
+        "roof" => {
+            if args.len() < 7 {
+                return Err("Usage: roof <type: gabled|hipped|mansard|conical> <x> <y> <z> <sx> <sy> <sz> [color] [overhang]".to_string());
+            }
+            let r_type = crate::architecture::RoofType::from_str(args[0])
+                .ok_or_else(|| "Invalid roof type (must be gabled, hipped, mansard, or conical)".to_string())?;
+            let x: i32 = args[1].parse().map_err(|_| "Invalid x")?;
+            let y: i32 = args[2].parse().map_err(|_| "Invalid y")?;
+            let z: i32 = args[3].parse().map_err(|_| "Invalid z")?;
+            let sx: u32 = args[4].parse().map_err(|_| "Invalid sx")?;
+            let sy: u32 = args[5].parse().map_err(|_| "Invalid sy")?;
+            let sz: u32 = args[6].parse().map_err(|_| "Invalid sz")?;
+            let color: u8 = if args.len() > 7 {
+                args[7].parse().map_err(|_| "Invalid color")?
+            } else {
+                project.palette.selected.max(1)
+            };
+            let overhang: u32 = if args.len() > 8 {
+                args[8].parse().unwrap_or(1)
+            } else {
+                1
+            };
+
+            project.record_undo();
+            let min = IVec3::new(x, y, z);
+            let max = IVec3::new(x + sx as i32 - 1, y + sy as i32 - 1, z + sz as i32 - 1);
+            crate::architecture::generate_roof(&mut project.grid, min, max, r_type, color, overhang);
+            Ok(CommandOutcome::Message(format!(
+                "Generated {:?} roof over origin ({}, {}, {}) size {}x{}x{}",
+                r_type, x, y, z, sx, sy, sz
+            )))
+        }
+        "light" => {
+            if args.is_empty() {
+                return Err("Usage: light <add|list|del|clear> ...".to_string());
+            }
+            match args[0].to_ascii_lowercase().as_str() {
+                "add" => {
+                    if args.len() < 4 {
+                        return Err("Usage: light add <x> <y> <z> [radius] [intensity]".to_string());
+                    }
+                    let x: f32 = args[1].parse().map_err(|_| "Invalid x")?;
+                    let y: f32 = args[2].parse().map_err(|_| "Invalid y")?;
+                    let z: f32 = args[3].parse().map_err(|_| "Invalid z")?;
+                    let radius: f32 = if args.len() > 4 {
+                        args[4].parse().unwrap_or(10.0)
+                    } else {
+                        10.0
+                    };
+                    let intensity: f32 = if args.len() > 5 {
+                        args[5].parse().unwrap_or(2.0)
+                    } else {
+                        2.0
+                    };
+                    let pl = crate::light::PointLight::warm(Vec3::new(x, y, z), radius, intensity);
+                    let idx = project.add_light(pl);
+                    Ok(CommandOutcome::Message(format!(
+                        "Added point light #{} at ({:.1}, {:.1}, {:.1}) r={:.1} i={:.1}",
+                        idx, x, y, z, radius, intensity
+                    )))
+                }
+                "list" => {
+                    if project.lights.is_empty() {
+                        Ok(CommandOutcome::Message("No point lights in scene".to_string()))
+                    } else {
+                        let mut desc = format!("Scene contains {} point lights:\n", project.lights.len());
+                        for (i, l) in project.lights.iter().enumerate() {
+                            desc.push_str(&format!(
+                                "  #{}: pos=({:.1}, {:.1}, {:.1}) r={:.1} i={:.1} rgb=[{:.2}, {:.2}, {:.2}]\n",
+                                i, l.position.x, l.position.y, l.position.z, l.radius, l.intensity,
+                                l.color[0], l.color[1], l.color[2]
+                            ));
+                        }
+                        Ok(CommandOutcome::Message(desc.trim_end().to_string()))
+                    }
+                }
+                "del" | "delete" | "remove" => {
+                    if args.len() < 2 {
+                        return Err("Usage: light del <idx>".to_string());
+                    }
+                    let idx: usize = args[1].parse().map_err(|_| "Invalid light index")?;
+                    if project.remove_light(idx).is_some() {
+                        Ok(CommandOutcome::Message(format!("Removed point light #{}", idx)))
+                    } else {
+                        Err(format!("No point light with index {}", idx))
+                    }
+                }
+                "clear" => {
+                    let count = project.lights.len();
+                    project.clear_lights();
+                    Ok(CommandOutcome::Message(format!("Cleared {} point lights", count)))
+                }
+                _ => Err("Usage: light <add <x y z [r] [i]> | list | del <idx> | clear>".to_string()),
+            }
+        }
+        "pond" => {
+            if args.len() < 5 {
+                return Err("Usage: pond <x> <y> <z> <radius> <depth> [water_color]".to_string());
+            }
+            let x: i32 = args[0].parse().map_err(|_| "Invalid x")?;
+            let y: i32 = args[1].parse().map_err(|_| "Invalid y")?;
+            let z: i32 = args[2].parse().map_err(|_| "Invalid z")?;
+            let radius: u32 = args[3].parse().map_err(|_| "Invalid radius")?;
+            let depth: u32 = args[4].parse().map_err(|_| "Invalid depth")?;
+            let water_color: u8 = if args.len() > 5 {
+                args[5].parse().map_err(|_| "Invalid water color")?
+            } else {
+                project.palette.selected.max(1)
+            };
+
+            project.record_undo();
+            crate::biome::carve_pond(&mut project.grid, IVec3::new(x, y, z), radius, depth, water_color);
+            Ok(CommandOutcome::Message(format!(
+                "Carved pond at ({}, {}, {}) radius: {} depth: {}",
+                x, y, z, radius, depth
+            )))
+        }
+        "tree" => {
+            if args.len() < 3 {
+                return Err("Usage: tree <x> <y> <z> [height] [radius] [trunk_color] [foliage_color]".to_string());
+            }
+            let x: i32 = args[0].parse().map_err(|_| "Invalid x")?;
+            let y: i32 = args[1].parse().map_err(|_| "Invalid y")?;
+            let z: i32 = args[2].parse().map_err(|_| "Invalid z")?;
+            let height: u32 = if args.len() > 3 {
+                args[3].parse().map_err(|_| "Invalid height")?
+            } else {
+                6
+            };
+            let radius: u32 = if args.len() > 4 {
+                args[4].parse().map_err(|_| "Invalid radius")?
+            } else {
+                4
+            };
+            let trunk_color: u8 = if args.len() > 5 {
+                args[5].parse().map_err(|_| "Invalid trunk color")?
+            } else {
+                78
+            };
+            let foliage_color: u8 = if args.len() > 6 {
+                args[6].parse().map_err(|_| "Invalid foliage color")?
+            } else {
+                105
+            };
+
+            project.record_undo();
+            crate::biome::generate_fluffy_tree(
+                &mut project.grid,
+                IVec3::new(x, y, z),
+                height,
+                radius,
+                trunk_color,
+                foliage_color,
+            );
+            Ok(CommandOutcome::Message(format!(
+                "Generated fluffy tree at ({}, {}, {}) height: {} radius: {}",
+                x, y, z, height, radius
+            )))
         }
         "o" | "odir" => {
             let fmt = args.first().map(|s| s.to_ascii_lowercase()).unwrap_or_else(|| "vox".to_string());

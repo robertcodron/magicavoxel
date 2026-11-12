@@ -878,3 +878,187 @@ fn world_snapshot() {
     )
     .expect("write png");
 }
+
+#[test]
+fn radial_menu_open_interaction_and_close() {
+    use crate::ui::radial_menu::RadialAction;
+    use mv_core::BrushMode;
+
+    let mut h = Harness::new(EditorProject::new_empty(16, 16, 16));
+    assert!(!h.app.radial_menu.is_open);
+
+    // 1. Press Space to open radial menu
+    h.key(Key::Space);
+    assert!(h.app.radial_menu.is_open);
+    let center = h.app.radial_menu.center;
+
+    // 2. Escape closes the radial menu without action
+    h.key(Key::Escape);
+    assert!(!h.app.radial_menu.is_open);
+
+    // 3. Re-open via Space
+    h.key(Key::Space);
+    assert!(h.app.radial_menu.is_open);
+
+    // In default Brushes category, the sectors are: Voxel, Face, Box, Line, Center, Pattern
+    // Sector 2 is Box (index 2: angle around 2 * TAU / 6 = 2 * PI / 3)
+    let radius = 130.0;
+    let angle = 2.0 * std::f32::consts::TAU / 6.0 + 0.1;
+    let target_pos = center + egui::vec2(angle.cos(), angle.sin()) * radius;
+
+    h.events.push(Event::PointerMoved(target_pos));
+    h.step();
+    assert_eq!(
+        h.app.radial_menu.hovered_action,
+        Some(RadialAction::BrushBox)
+    );
+
+    // Click to execute action
+    h.click(target_pos);
+    assert!(!h.app.radial_menu.is_open);
+    assert_eq!(h.app.project.brush.mode, BrushMode::Box);
+}
+
+#[test]
+fn direct_extrusion_with_discrete_snap_and_undo() {
+    use mv_core::Axis;
+
+    let mut h = Harness::new(EditorProject::new_empty(16, 16, 16));
+    // Fill a 4x4x4 cube at (4,4,4) to (7,7,7)
+    for z in 4..8 {
+        for y in 4..8 {
+            for x in 4..8 {
+                h.app.project.grid.set(x, y, z, 1);
+            }
+        }
+    }
+    let orig_solid = h.app.project.grid.count_solid();
+    assert_eq!(orig_solid, 64);
+
+    // Set extrusion snap to 4 voxels
+    h.app.extrude_state.snap = 4;
+    assert_eq!(h.app.extrude_state.snap, 4);
+
+    // Record undo and extrude +Z face programmatically using apply_volume_extrusion
+    h.app.project.record_undo();
+    crate::extrude_gizmo::apply_volume_extrusion(&mut h.app.project, Axis::Z, 4);
+    assert_eq!(h.app.project.grid.count_solid(), 64 + 16 * 4);
+
+    // Test undo reverts the extrusion
+    h.app.project.undo();
+    assert_eq!(h.app.project.grid.count_solid(), 64);
+}
+
+#[test]
+fn atmosphere_presets_and_voxel_shapes() {
+    use mv_render::{AtmospherePreset, VoxelShape};
+
+    let mut h = Harness::new(EditorProject::new_empty(8, 8, 8));
+    h.app.mode = ViewportMode::PathTracer;
+
+    // Apply Golden Hour
+    h.app.active_atmosphere = Some(AtmospherePreset::GoldenHour);
+    AtmospherePreset::GoldenHour.apply_to_settings(&mut h.app.pt_settings);
+    h.app.display.apply_preset(AtmospherePreset::GoldenHour);
+
+    assert_eq!(h.app.pt_settings.sun_intensity, 2.2);
+    assert_eq!(h.app.pt_settings.fog_density, 0.004);
+    assert_eq!(h.app.pt_settings.sky_color, [0.95, 0.62, 0.32]);
+    assert_eq!(h.app.display.sun_elevation_deg, 12.0);
+
+    // Apply Midnight Fairytale
+    h.app.active_atmosphere = Some(AtmospherePreset::MidnightFairytale);
+    AtmospherePreset::MidnightFairytale.apply_to_settings(&mut h.app.pt_settings);
+    h.app.display.apply_preset(AtmospherePreset::MidnightFairytale);
+
+    assert_eq!(h.app.pt_settings.sun_intensity, 0.15);
+    assert_eq!(h.app.pt_settings.sky_color, [0.03, 0.05, 0.16]);
+
+    // Apply Misty Morning
+    h.app.active_atmosphere = Some(AtmospherePreset::MistyMorning);
+    AtmospherePreset::MistyMorning.apply_to_settings(&mut h.app.pt_settings);
+    h.app.display.apply_preset(AtmospherePreset::MistyMorning);
+
+    assert_eq!(h.app.pt_settings.fog_density, 0.025);
+    assert_eq!(h.app.display.sun_elevation_deg, 22.0);
+
+    // Voxel shapes
+    h.app.display.voxel_shape = VoxelShape::Lego;
+    assert_eq!(h.app.display.voxel_shape, VoxelShape::Lego);
+
+    h.app.display.voxel_shape = VoxelShape::Clay;
+    assert_eq!(h.app.display.voxel_shape, VoxelShape::Clay);
+}
+
+#[test]
+fn custom_hotkeys_config_loading_and_dispatch() {
+    use crate::shortcuts::HotkeyConfig;
+
+    let mut h = Harness::new(EditorProject::new_empty(10, 10, 10));
+
+    let config_content = r#"
+        # Custom shortcuts configuration
+        F2 : full
+        F3 : zero
+        CTRL+K : inv
+        SPACE : radial_menu
+    "#;
+    let cfg = HotkeyConfig::parse_str(config_content);
+    assert_eq!(cfg.bindings.len(), 4);
+    h.app.hotkeys = cfg;
+
+    // Initially grid is empty
+    assert_eq!(h.app.project.grid.count_solid(), 0);
+
+    // Press F2 -> full
+    h.key(Key::F2);
+    assert_eq!(h.app.project.grid.count_solid(), 1000);
+
+    // Press F3 -> zero
+    h.key(Key::F3);
+    assert_eq!(h.app.project.grid.count_solid(), 0);
+}
+
+#[test]
+fn cozy_builder_operations_and_undo() {
+    use mv_core::architecture::RoofType;
+
+    let mut h = Harness::new(EditorProject::new_empty(20, 20, 20));
+    assert_eq!(h.app.project.grid.count_solid(), 0);
+
+    // 1. Cozy roof
+    h.app.execute_cozy_roof(RoofType::Gabled);
+    let solid_roof = h.app.project.grid.count_solid();
+    assert!(solid_roof > 0);
+
+    // Undo roof
+    h.app.project.undo();
+    assert_eq!(h.app.project.grid.count_solid(), 0);
+
+    // 2. Cozy fluffy tree
+    h.app.execute_cozy_tree();
+    let solid_tree = h.app.project.grid.count_solid();
+    assert!(solid_tree > 0);
+
+    // Undo tree
+    h.app.project.undo();
+    assert_eq!(h.app.project.grid.count_solid(), 0);
+
+    // 3. Cozy pond
+    h.app.execute_cozy_pond();
+    let solid_pond = h.app.project.grid.count_solid();
+    assert!(solid_pond > 0);
+
+    // Undo pond
+    h.app.project.undo();
+    assert_eq!(h.app.project.grid.count_solid(), 0);
+
+    // 4. Cozy lantern
+    h.app.execute_cozy_lantern(true);
+    let solid_lantern = h.app.project.grid.count_solid();
+    assert!(solid_lantern > 0);
+
+    // Undo lantern
+    h.app.project.undo();
+    assert_eq!(h.app.project.grid.count_solid(), 0);
+}

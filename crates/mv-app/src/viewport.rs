@@ -52,6 +52,60 @@ impl MagicaVoxelApp {
                     }
                 }
 
+                let cam_copy = self.camera.clone();
+                let to_screen = move |world_pos: glam::Vec3| -> Option<egui::Pos2> {
+                    let ndc = cam_copy.project_to_ndc(world_pos, aspect)?;
+                    Some(egui::pos2(
+                        rect.left() + (ndc.x + 1.0) * 0.5 * rect.width(),
+                        rect.top() + (1.0 - ndc.y) * 0.5 * rect.height(),
+                    ))
+                };
+
+                let pointer_pos = response.hover_pos().or_else(|| response.interact_pointer_pos());
+
+                // Radial Menu (Invoked by right-click or Space)
+                if response.clicked_by(PointerButton::Secondary) {
+                    let p = pointer_pos.unwrap_or_else(|| rect.center());
+                    self.radial_menu.open(p, ui.input(|i| i.time));
+                }
+
+                if self.radial_menu.is_open {
+                    self.radial_menu.update_hover(pointer_pos, ui.input(|i| i.stable_dt));
+                    let clicked = response.clicked_by(PointerButton::Primary)
+                        || response.drag_stopped_by(PointerButton::Primary)
+                        || response.drag_stopped_by(PointerButton::Secondary);
+                    if clicked {
+                        if let Some(act) = self.radial_menu.hovered_action {
+                            let msg = crate::ui::radial_menu::execute_radial_action(
+                                &mut self.project,
+                                act,
+                            );
+                            if let Some(log) = msg {
+                                self.project.console_logs.push(log);
+                            }
+                            self.radial_menu.close();
+                        } else if self.radial_menu.hovered_category.is_none() {
+                            self.radial_menu.close();
+                        }
+                    }
+                } else if self.mode == ViewportMode::ModelEditor {
+                    // Direct manipulation extrusion handles
+                    let p_down = response.dragged_by(PointerButton::Primary);
+                    let p_click = response.clicked_by(PointerButton::Primary);
+                    let p_rel = response.drag_stopped_by(PointerButton::Primary);
+                    let log_msg = self.extrude_state.handle_input(
+                        &mut self.project,
+                        pointer_pos,
+                        p_down,
+                        p_click,
+                        p_rel,
+                        &to_screen,
+                    );
+                    if let Some(msg) = log_msg {
+                        self.project.console_logs.push(msg);
+                    }
+                }
+
                 if self.mode == ViewportMode::WorldEditor {
                     self.update_world_viewport(ui, &response, rect, render_w, render_h);
                 } else {
@@ -134,7 +188,10 @@ impl MagicaVoxelApp {
                         }
                     } else {
                         // Model Editor sculpting with LButton
-                        if !space_down {
+                        if !space_down
+                            && !self.radial_menu.is_open
+                            && !self.extrude_state.is_active_or_hovered()
+                        {
                             if response.clicked_by(PointerButton::Primary)
                                 || response.drag_started_by(PointerButton::Primary)
                             {
@@ -149,6 +206,7 @@ impl MagicaVoxelApp {
                                         );
                                         if c != 0 {
                                             self.project.palette.selected = c;
+                                            self.radial_menu.record_color(c);
                                         }
                                     } else {
                                         self.project.record_undo();
@@ -281,7 +339,14 @@ impl MagicaVoxelApp {
                         Color32::WHITE,
                     );
                 }
+                if self.mode == ViewportMode::ModelEditor {
+                    self.extrude_state
+                        .render(ui.painter(), &self.project, &to_screen);
+                }
                 self.show_view_cube(ui, rect);
+                if self.radial_menu.is_open {
+                    self.radial_menu.render(ui.painter(), pointer_pos);
+                }
             });
     }
 }

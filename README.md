@@ -49,16 +49,16 @@ La variable d'environnement optionnelle `MV_SHADER_DIR` indique un dossier de Vo
 - `voxel_batch` est **atomique** : tout ou rien.
 - Les coordonnées hors du canevas sont tronquées (clipping).
 
-### Outils (23)
+### Outils (27)
 
 **Projet**
 
 | Outil | Rôle |
 | :--- | :--- |
 | `project_new` | Crée un projet vide (taille, nom). |
-| `project_open` | Ouvre un fichier `.vox`. |
+| `project_open` | Ouvre un projet `.vox`, Qubicle `.qb` ou heightmap de terrain `.png`. |
 | `project_save` | Enregistre le projet en `.vox`. |
-| `project_export` | Exporte en `vox`, `glb`/`gltf`, `obj`, `ply` ou `slice_png`. |
+| `project_export` | Exporte en `vox`, `glb`/`gltf`, `obj`, `ply`, `slice_png`, `qb`, `heightmap_png`, `marching_cubes_obj` ou `marching_cubes_ply`. |
 | `project_info` | Donne un aperçu JSON du projet, de la scène et de l'animation. |
 | `console_command` | Exécute n'importe quelle commande console (`size`, `mir`, `xs wave`…). |
 | `history` | Annule ou refait (`scope` : `model` ou `world`). |
@@ -98,6 +98,15 @@ La variable d'environnement optionnelle `MV_SHADER_DIR` indique un dossier de Vo
 | :--- | :--- |
 | `render_preview` | Rend une image PNG (`model`, `world` ou `pathtracer`) pour vérifier le résultat. |
 | `camera` | Lit ou règle la caméra utilisée par `render_preview` (`auto_frame` désactivé). |
+
+**Cozy & Procédural**
+
+| Outil | Rôle |
+| :--- | :--- |
+| `smart_brush` | Tracé spline et biomes : `curve_wall`, `smart_arch`, `fence`, `paint_path`, `grow_ivy`, `pond`, `tree`. |
+| `architecture_generate` | Éléments d'architecture procéduraux : `roof` (gabled, hipped, mansard, conical), `window`, `door`, `chimney`. |
+| `light_manage` | Gestion des lumières et accessoires : `add`, `remove`, `clear`, `list`, `spawn_lantern`. |
+| `gizmo_transform` | Transformations et grille : `extrude` (face/sélection), `translate` (magnétisme de grille), `snap_config`. |
 
 ### Exemple de workflow
 

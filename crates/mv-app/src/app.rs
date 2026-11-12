@@ -6,10 +6,15 @@ use mv_format::{
     export_gltf, export_obj_greedy, export_ply_point_cloud, export_slice_png, load_vox_file,
     save_vox_file, GltfOptions,
 };
-use mv_render::{DisplaySettings, OrbitCamera, PathTracerEngine, PathTracerSettings, RayHit};
+use mv_render::{
+    AtmospherePreset, DisplaySettings, OrbitCamera, PathTracerEngine, PathTracerSettings, RayHit,
+};
 
 use crate::backup::AutoBackup;
+use crate::extrude_gizmo::ExtrudeGizmoState;
 use crate::shaders::ShaderPanel;
+use crate::shortcuts::HotkeyConfig;
+use crate::ui::radial_menu::RadialMenu;
 use crate::unsaved::PendingAction;
 use crate::world_editor::WorldEditorState;
 
@@ -59,6 +64,11 @@ pub(crate) struct MagicaVoxelApp {
     pub(crate) pending_action: Option<PendingAction>,
     /// Set once the user confirmed quitting (lets the next close request through).
     pub(crate) allow_close: bool,
+    pub(crate) hotkeys: HotkeyConfig,
+    pub(crate) radial_menu: RadialMenu,
+    pub(crate) extrude_state: ExtrudeGizmoState,
+    pub(crate) active_atmosphere: Option<AtmospherePreset>,
+    pub(crate) cozy_tab_open: bool,
 }
 
 impl MagicaVoxelApp {
@@ -113,6 +123,11 @@ impl MagicaVoxelApp {
             backup: AutoBackup::new(),
             pending_action: None,
             allow_close: false,
+            hotkeys: HotkeyConfig::load_default_or_file(),
+            radial_menu: RadialMenu::new(),
+            extrude_state: ExtrudeGizmoState::new(),
+            active_atmosphere: Some(AtmospherePreset::Default),
+            cozy_tab_open: false,
         }
     }
 

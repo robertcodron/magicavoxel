@@ -10,8 +10,8 @@ use mv_core::{EditorProject, MaterialType, NodeId, Rgba, Rotation, VoxelGrid};
 use rayon::prelude::*;
 
 use crate::{
-    bounding_frame_wire_t, compute_voxel_ao, dda_raycast_grid, intersect_aabb_with_normal,
-    voxel_face_edge_distance, DisplaySettings, OrbitCamera,
+    bounding_frame_wire_t, compute_voxel_ao, dda_raycast_grid, dda_raycast_grid_shaped,
+    intersect_aabb_with_normal, voxel_face_edge_distance, DisplaySettings, OrbitCamera, VoxelShape,
 };
 
 const MAX_RAY_DIST: f32 = 4000.0;
@@ -54,6 +54,7 @@ pub struct WorldHit {
     pub voxel: IVec3,
     pub normal_local: IVec3,
     pub normal: IVec3,
+    pub normal_vec: Vec3,
     pub hit_pos: Vec3,
     pub hit_pos_local: Vec3,
     pub t: f32,
@@ -245,6 +246,17 @@ impl<'a> WorldView<'a> {
 
     /// Nearest voxel hit along a world ray (accelerated by BVH).
     pub fn raycast(&self, origin: Vec3, dir: Vec3, max_t: f32) -> Option<WorldHit> {
+        self.raycast_shaped(origin, dir, max_t, VoxelShape::Cube)
+    }
+
+    /// Nearest voxel hit along a world ray with specified voxel shape (accelerated by BVH).
+    pub fn raycast_shaped(
+        &self,
+        origin: Vec3,
+        dir: Vec3,
+        max_t: f32,
+        shape: VoxelShape,
+    ) -> Option<WorldHit> {
         if self.bvh.nodes.is_empty() {
             return None;
         }
@@ -285,7 +297,7 @@ impl<'a> WorldView<'a> {
                     }
                     let lo = inst.to_local(origin);
                     let ld = inst.inverse.apply_f32(dir);
-                    if let Some(hit) = dda_raycast_grid(inst.grid, lo, ld, curr_best_t) {
+                    if let Some(hit) = dda_raycast_grid_shaped(inst.grid, lo, ld, curr_best_t, shape) {
                         if hit.t < curr_best_t {
                             best = Some(WorldHit {
                                 instance: idx,
@@ -293,6 +305,7 @@ impl<'a> WorldView<'a> {
                                 voxel: hit.voxel,
                                 normal_local: hit.normal,
                                 normal: inst.rotation.apply(hit.normal),
+                                normal_vec: inst.rotation.apply_f32(hit.normal_vec),
                                 hit_pos: origin + dir * hit.t,
                                 hit_pos_local: hit.hit_pos,
                                 t: hit.t,
@@ -377,8 +390,19 @@ pub fn pick_world(
     ndc: Vec2,
     aspect: f32,
 ) -> Option<WorldHit> {
+    pick_world_shaped(view, camera, ndc, aspect, VoxelShape::Cube)
+}
+
+/// World ray under a viewport position with configurable voxel shape.
+pub fn pick_world_shaped(
+    view: &WorldView,
+    camera: &OrbitCamera,
+    ndc: Vec2,
+    aspect: f32,
+    shape: VoxelShape,
+) -> Option<WorldHit> {
     let (o, d) = camera.ray_for_ndc(ndc, aspect);
-    view.raycast(o, d, MAX_RAY_DIST)
+    view.raycast_shaped(o, d, MAX_RAY_DIST, shape)
 }
 
 /// Render the World Editor viewport into `out_rgba` (`width * height * 4`).
@@ -429,7 +453,7 @@ fn shade_world_ray(
         Vec3::splat(0.12)
     };
 
-    let hit = view.raycast(o, d, MAX_RAY_DIST);
+    let hit = view.raycast_shaped(o, d, MAX_RAY_DIST, display.voxel_shape);
     let ground_t = if (display.show_ground || display.show_grid) && d.z.abs() > 1e-5 {
         let t = -o.z / d.z;
         (t > 0.0 && t < ground_range).then_some(t)
@@ -444,7 +468,7 @@ fn shade_world_ray(
         let mat = project.materials[c_idx];
         let mut base = Vec3::new(pal.r as f32, pal.g as f32, pal.b as f32) / 255.0;
 
-        let n = h.normal.as_vec3();
+        let n = h.normal_vec;
         let ndotl = n.dot(sun_dir).max(0.0);
         let shadow = if display.show_shadows
             && ndotl > 0.0
@@ -476,6 +500,30 @@ fn shade_world_ray(
         };
         base = base * (diffuse * emit) + Vec3::splat(spec);
 
+        // Point lights evaluation in World Editor
+        let view_dir = -d;
+        for light in &project.lights {
+            let to_light = light.position - h.hit_pos;
+            let dist = to_light.length();
+            if dist < light.radius && dist > 1e-4 {
+                let l_dir = to_light / dist;
+                let l_ndotl = n.dot(l_dir).max(0.0);
+                if l_ndotl > 0.0 {
+                    let occluded = display.show_shadows && view.occluded(h.hit_pos + n * 0.02, l_dir, dist - 0.05);
+                    if !occluded {
+                        let atten = light.intensity / (1.0 + dist * dist);
+                        let cutoff = (1.0 - dist / light.radius).clamp(0.0, 1.0);
+                        let smooth_cutoff = cutoff * cutoff * (3.0 - 2.0 * cutoff);
+                        let l_col = Vec3::from_array(light.color);
+                        let factor = atten * smooth_cutoff * l_ndotl;
+                        let l_half = (l_dir + view_dir).normalize_or_zero();
+                        let l_spec = n.dot(l_half).max(0.0).powf(spec_power) * spec_strength * (atten * smooth_cutoff);
+                        base += (base * l_col) * factor + l_col * l_spec;
+                    }
+                }
+            }
+        }
+
         if display.show_edges || display.show_wireframe {
             let threshold = if display.show_wireframe { 0.09 } else { 0.045 };
             if voxel_face_edge_distance(h.hit_pos_local, h.normal_local) < threshold {
@@ -498,6 +546,26 @@ fn shade_world_ray(
             let mut g = Vec3::new(0.18, 0.20, 0.23);
             if display.show_shadows && view.occluded(gp + Vec3::Z * 0.02, sun_dir, 512.0) {
                 g *= 0.62;
+            }
+
+            // Point lights illumination on ground
+            for light in &project.lights {
+                let to_light = light.position - gp;
+                let dist = to_light.length();
+                if dist < light.radius && dist > 1e-4 {
+                    let l_dir = to_light / dist;
+                    let l_ndotl = l_dir.z.max(0.0);
+                    if l_ndotl > 0.0 {
+                        let occluded = display.show_shadows && view.occluded(gp + Vec3::Z * 0.02, l_dir, dist - 0.05);
+                        if !occluded {
+                            let atten = light.intensity / (1.0 + dist * dist);
+                            let cutoff = (1.0 - dist / light.radius).clamp(0.0, 1.0);
+                            let smooth_cutoff = cutoff * cutoff * (3.0 - 2.0 * cutoff);
+                            let l_col = Vec3::from_array(light.color);
+                            g += g * l_col * (atten * smooth_cutoff * l_ndotl);
+                        }
+                    }
+                }
             }
             if display.show_grid {
                 let line = |v: f32, period: f32, w: f32| {

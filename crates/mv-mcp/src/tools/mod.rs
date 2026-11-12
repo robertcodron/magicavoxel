@@ -10,6 +10,7 @@
 use crate::json::JsonValue;
 use crate::session::McpSession;
 
+pub mod cozy;
 pub mod project;
 pub mod render;
 pub mod scene;
@@ -25,6 +26,7 @@ pub fn tool_definitions() -> Vec<JsonValue> {
     defs.extend(voxel::definitions());
     defs.extend(scene::definitions());
     defs.extend(render::definitions());
+    defs.extend(cozy::definitions());
     defs
 }
 
@@ -33,6 +35,7 @@ pub fn dispatch_tool_call(session: &mut McpSession, name: &str, args: &JsonValue
         .or_else(|| voxel::dispatch(session, name, args))
         .or_else(|| scene::dispatch(session, name, args))
         .or_else(|| render::dispatch(session, name, args))
+        .or_else(|| cozy::dispatch(session, name, args))
         .unwrap_or_else(|| Err(format!("Unknown tool '{name}'")))
 }
 

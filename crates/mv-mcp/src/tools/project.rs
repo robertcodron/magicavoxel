@@ -24,8 +24,24 @@ pub fn definitions() -> Vec<JsonValue> {
         ),
         tool(
             "project_open",
-            "Load a MagicaVoxel .vox file from disk, replacing the current project (scene, palette, materials).",
-            vec![("path", prop("string", "Path of the .vox file"))],
+            "Load a voxel project or heightmap from disk (.vox, Qubicle .qb, or terrain heightmap .png), replacing the current project (scene, palette, materials).",
+            vec![
+                ("path", prop("string", "Path of the file to open (.vox, .qb, or .png)")),
+                (
+                    "format",
+                    prop_enum(
+                        "File format (optional, auto-detected from file extension by default)",
+                        &["vox", "qb", "heightmap_png"],
+                    ),
+                ),
+                (
+                    "max_height",
+                    prop(
+                        "integer",
+                        "Max terrain height in voxels (1..=256, default 32) when importing a heightmap PNG",
+                    ),
+                ),
+            ],
             &["path"],
         ),
         tool(
@@ -36,13 +52,24 @@ pub fn definitions() -> Vec<JsonValue> {
         ),
         tool(
             "project_export",
-            "Export to another format. vox saves the project; glb/gltf (3D mesh, scale = voxel size), obj (greedy-meshed) and ply (point cloud) export the whole visible scene; slice_png exports the edited model as a stacked PNG slice strip.",
+            "Export to another format. vox saves the project; glb/gltf (3D mesh, scale = voxel size), obj (greedy-meshed) and ply (point cloud) export the whole visible scene; slice_png exports the edited model as a stacked PNG slice strip; qb exports to Qubicle Binary format; heightmap_png exports a 2D elevation heightmap; marching_cubes_obj and marching_cubes_ply export smoothed triangle meshes via Marching Cubes.",
             vec![
                 (
                     "format",
                     prop_enum(
                         "Export format",
-                        &["vox", "glb", "gltf", "obj", "ply", "slice_png"],
+                        &[
+                            "vox",
+                            "glb",
+                            "gltf",
+                            "obj",
+                            "ply",
+                            "slice_png",
+                            "qb",
+                            "heightmap_png",
+                            "marching_cubes_obj",
+                            "marching_cubes_ply",
+                        ],
                     ),
                 ),
                 ("path", prop("string", "Destination file path")),
@@ -127,20 +154,68 @@ fn project_new(session: &mut McpSession, args: &JsonValue) -> ToolResult {
 }
 
 fn project_open(session: &mut McpSession, args: &JsonValue) -> ToolResult {
-    let path = path_arg(args, "path")?;
-    let project =
-        mv_format::load_vox_file(path).map_err(|e| format!("Cannot open '{path}': {e}"))?;
-    session.project = project;
-    session.current_file = Some(PathBuf::from(path));
-    session.camera.recenter(&session.project.grid);
-    let d = session.project.grid.dimensions();
-    Ok(vec![text(format!(
-        "Opened '{path}': edited model {}x{}x{}, {} model(s) in scene.",
-        d.x,
-        d.y,
-        d.z,
-        session.project.scene.models.len()
-    ))])
+    let path_str = path_arg(args, "path")?;
+    let path = Path::new(path_str);
+    let ext = path
+        .extension()
+        .and_then(|s| s.to_str())
+        .unwrap_or("")
+        .to_ascii_lowercase();
+    let format = args.get_str("format").map(|s| s.to_ascii_lowercase());
+
+    let is_qb = format.as_deref() == Some("qb") || (format.is_none() && ext == "qb");
+    let is_heightmap =
+        format.as_deref() == Some("heightmap_png") || (format.is_none() && ext == "png");
+
+    if is_qb {
+        let bytes = std::fs::read(path).map_err(|e| format!("Cannot read '{path_str}': {e}"))?;
+        let project = mv_format::import_qb(&bytes)
+            .map_err(|e| format!("Cannot open Qubicle file '{path_str}': {e}"))?;
+        session.project = project;
+        session.current_file = Some(PathBuf::from(path_str));
+        session.camera.recenter(&session.project.grid);
+        let d = session.project.grid.dimensions();
+        Ok(vec![text(format!(
+            "Opened Qubicle file '{path_str}': edited model {}x{}x{}, {} model(s) in scene.",
+            d.x,
+            d.y,
+            d.z,
+            session.project.scene.models.len()
+        ))])
+    } else if is_heightmap {
+        let bytes = std::fs::read(path).map_err(|e| format!("Cannot read '{path_str}': {e}"))?;
+        let max_height = dim_arg(args, "max_height").unwrap_or(32);
+        let grid = mv_format::import_heightmap_png(&bytes, max_height, &session.project.palette)
+            .map_err(|e| format!("Cannot import heightmap '{path_str}': {e}"))?;
+        let d = grid.dimensions();
+        let mut project = EditorProject::new_empty(d.x, d.y, d.z);
+        if let Some(stem) = path.file_stem().and_then(|s| s.to_str()) {
+            project.name = stem.to_string();
+        }
+        let solid_count = grid.count_solid();
+        project.grid = grid;
+        session.project = project;
+        session.current_file = Some(PathBuf::from(path_str));
+        session.camera.recenter(&session.project.grid);
+        Ok(vec![text(format!(
+            "Imported heightmap PNG '{path_str}': terrain model {}x{}x{} ({} solid voxels).",
+            d.x, d.y, d.z, solid_count
+        ))])
+    } else {
+        let project = mv_format::load_vox_file(path_str)
+            .map_err(|e| format!("Cannot open '{path_str}': {e}"))?;
+        session.project = project;
+        session.current_file = Some(PathBuf::from(path_str));
+        session.camera.recenter(&session.project.grid);
+        let d = session.project.grid.dimensions();
+        Ok(vec![text(format!(
+            "Opened '{path_str}': edited model {}x{}x{}, {} model(s) in scene.",
+            d.x,
+            d.y,
+            d.z,
+            session.project.scene.models.len()
+        ))])
+    }
 }
 
 fn project_save(session: &mut McpSession, args: &JsonValue) -> ToolResult {
@@ -201,9 +276,33 @@ fn project_export(session: &mut McpSession, args: &JsonValue) -> ToolResult {
             mv_format::export_slice_png(p, &path).map_err(|e| e.to_string())?;
             String::new()
         }
+        "qb" => {
+            let bytes = mv_format::export_qb(p);
+            std::fs::write(&path, bytes)
+                .map_err(|e| format!("Cannot save Qubicle file '{}': {e}", path.display()))?;
+            String::new()
+        }
+        "heightmap_png" => {
+            let bytes = mv_format::export_heightmap_png(&p.grid).map_err(|e| e.to_string())?;
+            std::fs::write(&path, bytes)
+                .map_err(|e| format!("Cannot save heightmap PNG '{}': {e}", path.display()))?;
+            String::new()
+        }
+        "marching_cubes_obj" => {
+            let obj = mv_format::export_marching_cubes_obj(&p.grid, &p.palette);
+            std::fs::write(&path, obj)
+                .map_err(|e| format!("Cannot save Marching Cubes OBJ '{}': {e}", path.display()))?;
+            String::new()
+        }
+        "marching_cubes_ply" => {
+            let bytes = mv_format::export_marching_cubes_ply(&p.grid, &p.palette);
+            std::fs::write(&path, bytes)
+                .map_err(|e| format!("Cannot save Marching Cubes PLY '{}': {e}", path.display()))?;
+            String::new()
+        }
         other => {
             return Err(format!(
-                "Unknown format '{other}' (expected vox, glb, gltf, obj, ply, slice_png)"
+                "Unknown format '{other}' (expected vox, glb, gltf, obj, ply, slice_png, qb, heightmap_png, marching_cubes_obj, marching_cubes_ply)"
             ))
         }
     };
@@ -464,6 +563,10 @@ mod tests {
             ("ply", "m.ply"),
             ("slice_png", "m.png"),
             ("vox", "b.vox"),
+            ("qb", "m.qb"),
+            ("heightmap_png", "height.png"),
+            ("marching_cubes_obj", "mc.obj"),
+            ("marching_cubes_ply", "mc.ply"),
         ] {
             let p = dir.join(file);
             let a = format!(
@@ -473,6 +576,25 @@ mod tests {
             call(&mut s2, "project_export", &a).unwrap();
             assert!(p.exists(), "{fmt}");
         }
+
+        // Test project_open with Qubicle .qb
+        let qb_path = dir.join("m.qb");
+        let mut s_qb = McpSession::new();
+        let open_qb_args = format!(r#"{{"path":"{}"}}"#, qb_path.display());
+        call(&mut s_qb, "project_open", &open_qb_args).unwrap();
+        assert_eq!(s_qb.project.grid.get(2, 3, 4), 5);
+
+        // Test project_open with heightmap PNG
+        let hm_path = dir.join("height.png");
+        let mut s_hm = McpSession::new();
+        let open_hm_args = format!(
+            r#"{{"path":"{}","format":"heightmap_png","max_height":24}}"#,
+            hm_path.display()
+        );
+        call(&mut s_hm, "project_open", &open_hm_args).unwrap();
+        assert_eq!(s_hm.project.grid.size_z(), 24);
+        assert!(s_hm.project.grid.count_solid() > 0);
+
         assert!(call(
             &mut s2,
             "project_export",

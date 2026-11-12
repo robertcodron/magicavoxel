@@ -7,15 +7,25 @@ use mv_core::{EditorProject, Material, MaterialType, Palette, Rgba};
 use thiserror::Error;
 
 mod gltf;
+pub mod heightmap;
+pub mod marching_cubes;
+mod marching_cubes_table;
 mod mesh;
 mod placed;
+pub mod qb;
 mod scene_io;
 
 pub use gltf::{
     export_gltf, to_glb_bytes, to_gltf, to_gltf_json, GltfExport, GltfMaterial, GltfMesh, GltfNode,
     GltfOptions, GltfPrimitive,
 };
+pub use heightmap::{export_heightmap_png, import_heightmap_png};
+pub use marching_cubes::{
+    export_marching_cubes_obj, export_marching_cubes_ply, extract_marching_cubes_mesh, McMesh,
+    McVertex,
+};
 pub use mesh::{greedy_quads, GreedyQuad};
+pub use qb::{export_qb, import_qb};
 
 #[derive(Debug, Error)]
 pub enum FormatError {
@@ -25,6 +35,10 @@ pub enum FormatError {
     InvalidVox(String),
     #[error("Image encoding error: {0}")]
     Image(#[from] image::ImageError),
+    #[error("Invalid Qubicle (.qb) file: {0}")]
+    InvalidQb(String),
+    #[error("Heightmap processing error: {0}")]
+    Heightmap(String),
 }
 
 /// Serialize an `EditorProject` into binary MagicaVoxel `.vox` format (version 150)
@@ -924,5 +938,51 @@ mod tests {
         // Voxel (1,1,1) of a 2³ model centered on its node -> world (0,0,0) and (5,0,0).
         assert!(text.contains("\n0 0 0 "), "{text}");
         assert!(text.contains("\n5 0 0 "), "{text}");
+    }
+
+    #[test]
+    fn test_public_qb_api() {
+        let mut proj = EditorProject::new_empty(5, 5, 5);
+        proj.grid.set(2, 2, 2, 7);
+        let qb_data = export_qb(&proj);
+        let reimported = import_qb(&qb_data).expect("Public import_qb failed");
+        assert_eq!(reimported.grid.size_x(), 5);
+        assert_eq!(reimported.grid.size_y(), 5);
+        assert_eq!(reimported.grid.size_z(), 5);
+        assert_eq!(reimported.grid.count_solid(), 1);
+    }
+
+    #[test]
+    fn test_public_heightmap_api() {
+        let palette = Palette::default();
+        let img: image::ImageBuffer<image::Rgba<u8>, Vec<u8>> =
+            image::ImageBuffer::from_pixel(8, 8, image::Rgba([128, 128, 128, 255]));
+        let mut png = Vec::new();
+        img.write_to(
+            &mut std::io::Cursor::new(&mut png),
+            image::ImageFormat::Png,
+        )
+        .unwrap();
+
+        let grid = import_heightmap_png(&png, 20, &palette).expect("Public import_heightmap_png failed");
+        assert_eq!(grid.size_x(), 8);
+        assert_eq!(grid.size_y(), 8);
+        assert_eq!(grid.size_z(), 20);
+        assert!(grid.count_solid() > 0);
+    }
+
+    #[test]
+    fn test_public_marching_cubes_api() {
+        let palette = Palette::default();
+        let mut grid = VoxelGrid::new(4, 4, 4);
+        grid.set(1, 1, 1, 3);
+        grid.set(2, 1, 1, 3);
+
+        let obj = export_marching_cubes_obj(&grid, &palette);
+        assert!(obj.contains("v "));
+        assert!(obj.contains("f "));
+
+        let ply = export_marching_cubes_ply(&grid, &palette);
+        assert!(!ply.is_empty());
     }
 }

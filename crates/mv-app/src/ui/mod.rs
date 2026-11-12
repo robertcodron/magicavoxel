@@ -2,6 +2,7 @@
 
 mod console;
 mod left_panel;
+pub(crate) mod radial_menu;
 mod right_panel;
 mod shader_panel;
 mod timeline;

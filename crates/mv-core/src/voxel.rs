@@ -299,6 +299,111 @@ impl VoxelGrid {
         true
     }
 
+    /// `extrude`: extrude outer solid face along the specified axis by `amount` voxels
+    pub fn extrude(&mut self, axis: Axis, amount: i32) {
+        if amount == 0 {
+            return;
+        }
+        self.revision = next_grid_revision();
+        let prev = self.clone();
+
+        match axis {
+            Axis::Z => {
+                if amount > 0 {
+                    for y in 0..self.size_y {
+                        for x in 0..self.size_x {
+                            if let Some(top_z) = (0..self.size_z).rev().find(|&z| prev.get(x, y, z) != 0) {
+                                let c = prev.get(x, y, top_z);
+                                for step in 1..=amount {
+                                    let target_z = top_z + step as u32;
+                                    if target_z < self.size_z {
+                                        self.set(x, y, target_z, c);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                } else {
+                    let steps = amount.abs() as u32;
+                    for y in 0..self.size_y {
+                        for x in 0..self.size_x {
+                            if let Some(bot_z) = (0..self.size_z).find(|&z| prev.get(x, y, z) != 0) {
+                                let c = prev.get(x, y, bot_z);
+                                for step in 1..=steps {
+                                    if bot_z >= step {
+                                        self.set(x, y, bot_z - step, c);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            Axis::X => {
+                if amount > 0 {
+                    for z in 0..self.size_z {
+                        for y in 0..self.size_y {
+                            if let Some(top_x) = (0..self.size_x).rev().find(|&x| prev.get(x, y, z) != 0) {
+                                let c = prev.get(top_x, y, z);
+                                for step in 1..=amount {
+                                    let target_x = top_x + step as u32;
+                                    if target_x < self.size_x {
+                                        self.set(target_x, y, z, c);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                } else {
+                    let steps = amount.abs() as u32;
+                    for z in 0..self.size_z {
+                        for y in 0..self.size_y {
+                            if let Some(bot_x) = (0..self.size_x).find(|&x| prev.get(x, y, z) != 0) {
+                                let c = prev.get(bot_x, y, z);
+                                for step in 1..=steps {
+                                    if bot_x >= step {
+                                        self.set(bot_x - step, y, z, c);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            Axis::Y => {
+                if amount > 0 {
+                    for z in 0..self.size_z {
+                        for x in 0..self.size_x {
+                            if let Some(top_y) = (0..self.size_y).rev().find(|&y| prev.get(x, y, z) != 0) {
+                                let c = prev.get(x, top_y, z);
+                                for step in 1..=amount {
+                                    let target_y = top_y + step as u32;
+                                    if target_y < self.size_y {
+                                        self.set(x, target_y, z, c);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                } else {
+                    let steps = amount.abs() as u32;
+                    for z in 0..self.size_z {
+                        for x in 0..self.size_x {
+                            if let Some(bot_y) = (0..self.size_y).find(|&y| prev.get(x, y, z) != 0) {
+                                let c = prev.get(x, bot_y, z);
+                                for step in 1..=steps {
+                                    if bot_y >= step {
+                                        self.set(x, bot_y - step, z, c);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     /// `flip [axis]`: flip model along specified axes
     pub fn flip(&mut self, axes: AxisFlags) {
         self.revision = next_grid_revision();

@@ -1,17 +1,24 @@
+pub mod architecture;
+pub mod biome;
 pub mod brush;
 pub mod command;
 pub mod history;
+pub mod light;
 pub mod material;
 pub mod palette;
 pub mod project;
 pub mod scene;
 pub mod selection;
+pub mod spline;
 pub mod voxel;
 pub mod xs;
 
+pub use architecture::{build_chimney, generate_roof, punch_door, punch_window, RoofType};
+pub use biome::{carve_pond, generate_fluffy_tree, grow_ivy, paint_path};
 pub use brush::{BrushAction, BrushMode, BrushSettings, VoxelSubShape};
 pub use command::{execute_console_command, CommandOutcome};
 pub use history::History;
+pub use light::{spawn_lantern, PointLight};
 pub use material::{Material, MaterialType};
 pub use palette::{Palette, Rgba};
 pub use project::EditorProject;
@@ -19,8 +26,12 @@ pub use scene::{
     NodeId, NodeKind, Rotation, Scene, SceneError, SceneLayer, SceneNode, SceneStructure, Transform,
 };
 pub use selection::{SelectionMask, VoxelClipboard};
-pub use xs::{parse_xs, XsInvocation, XsMode, XsStep, BUILTIN_SHADERS};
+pub use spline::{
+    carve_arch, eval_catmull_rom, eval_cubic_bezier, generate_fence, generate_spline_wall,
+    sample_catmull_rom, sample_cubic_bezier,
+};
 pub use voxel::{Axis, AxisFlags, VoxelGrid, MAX_GRID_DIM};
+pub use xs::{parse_xs, XsInvocation, XsMode, XsStep, BUILTIN_SHADERS};
 
 #[cfg(test)]
 mod tests {
@@ -246,5 +257,54 @@ mod tests {
             Ok(CommandOutcome::ExternalShader(_))
         ));
         assert_eq!(proj.active_frame_count(), 6);
+    }
+
+    #[test]
+    fn test_procedural_cozy_architecture_commands() {
+        let mut proj = EditorProject::new_empty(32, 32, 32);
+
+        // 1. Test extrude
+        proj.grid.set(10, 10, 0, 5);
+        proj.run_command("extrude z 3").unwrap();
+        assert_eq!(proj.grid.get(10, 10, 1), 5);
+        assert_eq!(proj.grid.get(10, 10, 2), 5);
+        assert_eq!(proj.grid.get(10, 10, 3), 5);
+
+        // 2. Test roof command
+        proj.run_command("roof gabled 5 5 10 12 12 6 22 1").unwrap();
+        assert!(proj.grid.raw_data().contains(&22));
+
+        // 3. Test arch command
+        proj.run_command("arch 16 16 0 6 8 3 33").unwrap();
+        assert!(proj.grid.raw_data().contains(&33));
+
+        // 4. Test wall_spline command
+        proj.run_command("wall_spline 44 2 4 1 2 2 0 10 4 0 20 2 0").unwrap();
+        assert!(proj.grid.raw_data().contains(&44));
+
+        // 5. Test pond command
+        proj.run_command("pond 16 16 5 4 3 55").unwrap();
+        assert!(proj.grid.raw_data().contains(&55));
+
+        // 6. Test tree command
+        proj.run_command("tree 25 25 0 6 3 70 80").unwrap();
+        assert!(proj.grid.raw_data().contains(&70));
+        assert!(proj.grid.raw_data().contains(&80));
+
+        // 7. Test light commands
+        assert_eq!(proj.lights.len(), 0);
+        proj.run_command("light add 16 16 12 15 2.5").unwrap();
+        assert_eq!(proj.lights.len(), 1);
+        assert_eq!(proj.lights[0].position, glam::Vec3::new(16.0, 16.0, 12.0));
+
+        let list_out = proj.run_command("light list").unwrap();
+        if let CommandOutcome::Message(msg) = list_out {
+            assert!(msg.contains("Scene contains 1 point lights"));
+        } else {
+            panic!("Expected list message");
+        }
+
+        proj.run_command("light del 0").unwrap();
+        assert_eq!(proj.lights.len(), 0);
     }
 }

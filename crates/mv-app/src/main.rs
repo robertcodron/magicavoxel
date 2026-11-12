@@ -1,5 +1,6 @@
 mod app;
 mod backup;
+mod extrude_gizmo;
 mod shaders;
 mod shortcuts;
 mod ui;

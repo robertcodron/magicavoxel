@@ -7,6 +7,109 @@ use std::hash::{Hash, Hasher};
 use crate::world::{Highlight, WorldView};
 use crate::{DisplaySettings, OrbitCamera};
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum AtmospherePreset {
+    #[default]
+    Default,
+    GoldenHour,
+    MidnightFairytale,
+    MistyMorning,
+}
+
+impl AtmospherePreset {
+    pub const ALL: [AtmospherePreset; 4] = [
+        AtmospherePreset::Default,
+        AtmospherePreset::GoldenHour,
+        AtmospherePreset::MidnightFairytale,
+        AtmospherePreset::MistyMorning,
+    ];
+
+    pub fn title(&self) -> &'static str {
+        match self {
+            Self::Default => "Default",
+            Self::GoldenHour => "Golden Hour",
+            Self::MidnightFairytale => "Midnight Fairytale",
+            Self::MistyMorning => "Misty Morning",
+        }
+    }
+
+    pub fn apply_to_settings(&self, settings: &mut PathTracerSettings) {
+        match self {
+            Self::Default => {
+                settings.sun_intensity = 1.4;
+                settings.fog_density = 0.0015;
+                settings.sky_color = [0.52, 0.68, 0.92];
+                settings.ground_color = [0.24, 0.26, 0.29];
+                settings.exposure = 1.15;
+                settings.vignette = 0.25;
+                settings.bloom = 0.0;
+                settings.use_aces = true;
+            }
+            Self::GoldenHour => {
+                settings.sun_intensity = 2.2;
+                settings.fog_density = 0.004;
+                settings.sky_color = [0.95, 0.62, 0.32];
+                settings.ground_color = [0.35, 0.25, 0.20];
+                settings.exposure = 1.25;
+                settings.vignette = 0.35;
+                settings.bloom = 0.35;
+                settings.use_aces = true;
+            }
+            Self::MidnightFairytale => {
+                settings.sun_intensity = 0.15;
+                settings.fog_density = 0.002;
+                settings.sky_color = [0.03, 0.05, 0.16];
+                settings.ground_color = [0.06, 0.08, 0.12];
+                settings.exposure = 1.6;
+                settings.vignette = 0.45;
+                settings.bloom = 0.60;
+                settings.use_aces = true;
+            }
+            Self::MistyMorning => {
+                settings.sun_intensity = 0.75;
+                settings.fog_density = 0.025;
+                settings.sky_color = [0.72, 0.78, 0.84];
+                settings.ground_color = [0.22, 0.26, 0.25];
+                settings.exposure = 1.05;
+                settings.vignette = 0.20;
+                settings.bloom = 0.25;
+                settings.use_aces = true;
+            }
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Hash)]
+#[repr(u32)]
+pub enum VoxelShape {
+    #[default]
+    Cube = 0,
+    Lego = 1,
+    Sphere = 2,
+    Cylinder = 3,
+    Clay = 4,
+}
+
+impl VoxelShape {
+    pub const ALL: [VoxelShape; 5] = [
+        VoxelShape::Cube,
+        VoxelShape::Lego,
+        VoxelShape::Sphere,
+        VoxelShape::Cylinder,
+        VoxelShape::Clay,
+    ];
+
+    pub fn title(&self) -> &'static str {
+        match self {
+            Self::Cube => "Cube",
+            Self::Lego => "Lego",
+            Self::Sphere => "Sphere",
+            Self::Cylinder => "Cylinder",
+            Self::Clay => "Clay",
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct PathTracerSettings {
     pub max_bounces: u32,
@@ -22,6 +125,8 @@ pub struct PathTracerSettings {
     pub sun_intensity: f32,
     pub sky_color: [f32; 3],
     pub ground_color: [f32; 3],
+    pub bloom: f32,
+    pub voxel_shape: VoxelShape,
 }
 
 impl Default for PathTracerSettings {
@@ -40,8 +145,23 @@ impl Default for PathTracerSettings {
             sun_intensity: 1.4,
             sky_color: [0.52, 0.68, 0.92],
             ground_color: [0.24, 0.26, 0.29],
+            bloom: 0.0,
+            voxel_shape: VoxelShape::Cube,
         }
     }
+}
+
+impl PathTracerSettings {
+    pub fn apply_preset(&mut self, preset: AtmospherePreset) {
+        preset.apply_to_settings(self);
+    }
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, Pod, Zeroable)]
+struct GpuPointLight {
+    pos_radius: [f32; 4],
+    col_intensity: [f32; 4],
 }
 
 #[repr(C)]
@@ -58,6 +178,7 @@ struct GpuPathTraceParams {
     resolution: [u32; 4],
     lens_post: [f32; 4],
     post_flags: [f32; 4],
+    extra_params: [f32; 4],
 }
 
 #[repr(C)]
@@ -137,6 +258,7 @@ struct WgpuBackend {
     materials_buf: wgpu::Buffer,
     voxels_buf: Option<(wgpu::Buffer, usize)>,
     instances_buf: Option<(wgpu::Buffer, usize)>,
+    lights_buf: Option<(wgpu::Buffer, usize)>,
     instance_count: u32,
     accum_buf: Option<(wgpu::Buffer, u32, u32)>,
     output_buf: Option<(wgpu::Buffer, u32, u32)>,
@@ -272,6 +394,16 @@ impl PathTracerEngine {
                     },
                     count: None,
                 },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 6,
+                    visibility: wgpu::ShaderStages::COMPUTE,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Storage { read_only: true },
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
             ],
         });
 
@@ -313,6 +445,7 @@ impl PathTracerEngine {
             materials_buf,
             voxels_buf: None,
             instances_buf: None,
+            lights_buf: None,
             instance_count: 0,
             accum_buf: None,
             output_buf: None,
@@ -432,6 +565,23 @@ impl PathTracerEngine {
                 "scene_instances_buf",
             );
 
+            let gpu_lights: Vec<GpuPointLight> = if project.lights.is_empty() {
+                vec![GpuPointLight {
+                    pos_radius: [0.0, 0.0, 0.0, 0.0],
+                    col_intensity: [0.0, 0.0, 0.0, 0.0],
+                }]
+            } else {
+                project.lights.iter().map(|l| GpuPointLight {
+                    pos_radius: [l.position.x, l.position.y, l.position.z, l.radius],
+                    col_intensity: [l.color[0], l.color[1], l.color[2], l.intensity],
+                }).collect()
+            };
+            upload(
+                &mut backend.lights_buf,
+                bytemuck::cast_slice(&gpu_lights),
+                "scene_point_lights_buf",
+            );
+
             let gpu_mats = build_gpu_materials(project);
             backend
                 .queue
@@ -523,6 +673,15 @@ impl PathTracerEngine {
                             .0
                             .as_entire_binding(),
                     },
+                    wgpu::BindGroupEntry {
+                        binding: 6,
+                        resource: backend
+                            .lights_buf
+                            .as_ref()
+                            .unwrap()
+                            .0
+                            .as_entire_binding(),
+                    },
                 ],
             });
 
@@ -543,7 +702,12 @@ impl PathTracerEngine {
                     pt.ground_color[2],
                     1.0,
                 ],
-                grid_size: [backend.instance_count, 0, 0, 0],
+                grid_size: [
+                    backend.instance_count,
+                    project.lights.len() as u32,
+                    pt.voxel_shape as u32,
+                    0,
+                ],
                 resolution: [w, h, self.current_samples, pt.max_bounces],
                 lens_post: [half_tan, pt.aperture, pt.focus_dist, pt.exposure],
                 post_flags: [
@@ -552,6 +716,7 @@ impl PathTracerEngine {
                     pt.sun_intensity,
                     flags_bits as f32,
                 ],
+                extra_params: [pt.bloom, pt.voxel_shape as u32 as f32, 0.0, 0.0],
             };
             backend
                 .queue
@@ -649,7 +814,7 @@ impl PathTracerEngine {
                         let ndc_y = 1.0 - ((py as f32 + 0.5 + jy) / height as f32) * 2.0;
                         let (ray_o, ray_d) = camera.ray_for_ndc(Vec2::new(ndc_x, ndc_y), aspect);
 
-                        let rad = if let Some(hit) = view.raycast(ray_o, ray_d, 1000.0) {
+                        let rad = if let Some(hit) = view.raycast_shaped(ray_o, ray_d, 1000.0, pt.voxel_shape) {
                             let grid = view.instances[hit.instance].grid;
                             let c = grid.get_i32(hit.voxel.x, hit.voxel.y, hit.voxel.z);
                             let col = project.palette.colors[c as usize];
@@ -662,13 +827,28 @@ impl PathTracerEngine {
                             if mat.kind == MaterialType::Emit || mat.emit > 0.01 {
                                 albedo * (mat.emit.max(1.0) * 3.0)
                             } else {
-                                let n = Vec3::new(
-                                    hit.normal.x as f32,
-                                    hit.normal.y as f32,
-                                    hit.normal.z as f32,
-                                );
+                                let n = hit.normal_vec;
                                 let ndotl = n.dot(sun_dir).max(0.0);
-                                albedo * (0.35 + ndotl * pt.sun_intensity)
+                                let mut light_contrib = Vec3::ZERO;
+                                for light in &project.lights {
+                                    let to_light = light.position - hit.hit_pos;
+                                    let dist = to_light.length();
+                                    if dist < light.radius && dist > 1e-4 {
+                                        let l_dir = to_light / dist;
+                                        let l_ndotl = n.dot(l_dir).max(0.0);
+                                        if l_ndotl > 0.0 {
+                                            let occluded = view.occluded(hit.hit_pos + n * 0.02, l_dir, dist - 0.05);
+                                            if !occluded {
+                                                let atten = light.intensity / (1.0 + dist * dist);
+                                                let cutoff = (1.0 - dist / light.radius).clamp(0.0, 1.0);
+                                                let smooth_cutoff = cutoff * cutoff * (3.0 - 2.0 * cutoff);
+                                                let l_col = Vec3::from_array(light.color);
+                                                light_contrib += albedo * l_col * (atten * smooth_cutoff * l_ndotl);
+                                            }
+                                        }
+                                    }
+                                }
+                                albedo * (0.35 + ndotl * pt.sun_intensity) + light_contrib
                             }
                         } else {
                             Vec3::from_array(pt.sky_color)
@@ -685,8 +865,56 @@ impl PathTracerEngine {
             self.current_samples += 1;
         }
 
+        let bloom_pixels = if pt.bloom > 0.001 {
+            let mut bright: Vec<Vec3> = self.cpu_accum
+                .iter()
+                .map(|&acc| {
+                    let c = acc * pt.exposure;
+                    let lum = c.x * 0.2126 + c.y * 0.7152 + c.z * 0.0722;
+                    if lum > 1.0 {
+                        c * ((lum - 1.0) / lum)
+                    } else {
+                        Vec3::ZERO
+                    }
+                })
+                .collect();
+            let mut temp = vec![Vec3::ZERO; total];
+            let weights = [0.05, 0.09, 0.12, 0.15, 0.18, 0.15, 0.12, 0.09, 0.05];
+            let radius = 4;
+            for py in 0..height {
+                for px in 0..width {
+                    let mut acc = Vec3::ZERO;
+                    let mut w_sum = 0.0;
+                    for (i, &w) in weights.iter().enumerate() {
+                        let kx = (px as i32 + i as i32 - radius).clamp(0, width as i32 - 1) as usize;
+                        acc += bright[py * width + kx] * w;
+                        w_sum += w;
+                    }
+                    temp[py * width + px] = acc / w_sum;
+                }
+            }
+            for py in 0..height {
+                for px in 0..width {
+                    let mut acc = Vec3::ZERO;
+                    let mut w_sum = 0.0;
+                    for (i, &w) in weights.iter().enumerate() {
+                        let ky = (py as i32 + i as i32 - radius).clamp(0, height as i32 - 1) as usize;
+                        acc += temp[ky * width + px] * w;
+                        w_sum += w;
+                    }
+                    bright[py * width + px] = acc / w_sum;
+                }
+            }
+            bright
+        } else {
+            Vec::new()
+        };
+
         for (i, &acc) in self.cpu_accum.iter().enumerate() {
             let mut c = acc * pt.exposure;
+            if pt.bloom > 0.001 && !bloom_pixels.is_empty() {
+                c += bloom_pixels[i] * (pt.bloom * 1.5);
+            }
             if pt.use_aces {
                 c = (c * (2.51 * c + Vec3::splat(0.03)))
                     / (c * (2.43 * c + Vec3::splat(0.59)) + Vec3::splat(0.14));
@@ -751,6 +979,21 @@ fn compute_scene_hash(project: &EditorProject, view: &WorldView) -> u64 {
             f.to_bits().hash(&mut hasher);
         }
     }
+    project.lights.len().hash(&mut hasher);
+    for l in &project.lights {
+        for f in [
+            l.position.x,
+            l.position.y,
+            l.position.z,
+            l.radius,
+            l.color[0],
+            l.color[1],
+            l.color[2],
+            l.intensity,
+        ] {
+            f.to_bits().hash(&mut hasher);
+        }
+    }
     hasher.finish()
 }
 
@@ -779,6 +1022,8 @@ fn compute_camera_and_settings_hash(
     pt.use_aces.hash(&mut hasher);
     pt.fog_density.to_bits().hash(&mut hasher);
     pt.sun_intensity.to_bits().hash(&mut hasher);
+    pt.bloom.to_bits().hash(&mut hasher);
+    (pt.voxel_shape as u32).hash(&mut hasher);
     for c in pt.sky_color {
         c.to_bits().hash(&mut hasher);
     }

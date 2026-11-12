@@ -8,7 +8,8 @@ use glam::{IVec3, Vec2, Vec3};
 use mv_core::{EditorProject, MaterialType, Rgba, VoxelGrid};
 use rayon::prelude::*;
 
-pub use gpu_pathtracer::{PathTracerEngine, PathTracerSettings};
+pub use gpu_pathtracer::{AtmospherePreset, PathTracerEngine, PathTracerSettings, VoxelShape};
+pub use mv_core::PointLight;
 pub use voxel_shader::{discover_shaders, ShaderArg, ShaderInputs, VoxelShader, VoxelShaderEngine};
 pub use world::{pick_world, render_world_rgba, Highlight, WorldHit, WorldView};
 
@@ -25,6 +26,7 @@ pub struct DisplaySettings {
     pub sun_azimuth_deg: f32,
     pub sun_elevation_deg: f32,
     pub render_scale: u32,
+    pub voxel_shape: VoxelShape,
 }
 
 impl Default for DisplaySettings {
@@ -41,6 +43,7 @@ impl Default for DisplaySettings {
             sun_azimuth_deg: 48.0,
             sun_elevation_deg: 58.0,
             render_scale: 1,
+            voxel_shape: VoxelShape::Cube,
         }
     }
 }
@@ -50,6 +53,27 @@ impl DisplaySettings {
         let az = self.sun_azimuth_deg.to_radians();
         let el = self.sun_elevation_deg.to_radians();
         Vec3::new(el.cos() * az.cos(), el.cos() * az.sin(), el.sin()).normalize()
+    }
+
+    pub fn apply_preset(&mut self, preset: AtmospherePreset) {
+        match preset {
+            AtmospherePreset::Default => {
+                self.sun_azimuth_deg = 48.0;
+                self.sun_elevation_deg = 58.0;
+            }
+            AtmospherePreset::GoldenHour => {
+                self.sun_azimuth_deg = 65.0;
+                self.sun_elevation_deg = 12.0;
+            }
+            AtmospherePreset::MidnightFairytale => {
+                self.sun_azimuth_deg = 140.0;
+                self.sun_elevation_deg = 45.0;
+            }
+            AtmospherePreset::MistyMorning => {
+                self.sun_azimuth_deg = 30.0;
+                self.sun_elevation_deg = 22.0;
+            }
+        }
     }
 }
 
@@ -188,9 +212,275 @@ impl OrbitCamera {
 pub struct RayHit {
     pub voxel: IVec3,
     pub normal: IVec3,
+    pub normal_vec: Vec3,
     pub hit_pos: Vec3,
     pub t: f32,
     pub is_ground: bool,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct ShapeHit {
+    pub t: f32,
+    pub normal: Vec3,
+}
+
+impl ShapeHit {
+    pub fn discrete_normal(&self, fallback: IVec3) -> IVec3 {
+        let an = self.normal.abs();
+        if an.x >= an.y && an.x >= an.z && an.x > 0.05 {
+            IVec3::new(self.normal.x.signum() as i32, 0, 0)
+        } else if an.y >= an.z && an.y > 0.05 {
+            IVec3::new(0, self.normal.y.signum() as i32, 0)
+        } else if an.z > 0.05 {
+            IVec3::new(0, 0, self.normal.z.signum() as i32)
+        } else {
+            fallback
+        }
+    }
+}
+
+pub fn intersect_sphere_voxel(
+    ro: Vec3,
+    rd: Vec3,
+    map_pos: IVec3,
+    t_enter: f32,
+    t_exit: f32,
+) -> Option<ShapeHit> {
+    let center = map_pos.as_vec3() + Vec3::splat(0.5);
+    let oc = ro - center;
+    let b = oc.dot(rd);
+    let c = oc.dot(oc) - 0.25;
+    let disc = b * b - c;
+    if disc < 0.0 {
+        return None;
+    }
+    let s = disc.sqrt();
+    let t0 = -b - s;
+    let t1 = -b + s;
+    let t = if t0 >= t_enter - 1e-4 && t0 <= t_exit + 1e-4 && t0 > 0.0 {
+        t0
+    } else if t1 >= t_enter - 1e-4 && t1 <= t_exit + 1e-4 && t1 > 0.0 {
+        t1
+    } else {
+        return None;
+    };
+    let p = ro + rd * t;
+    let normal = (p - center).normalize_or_zero();
+    Some(ShapeHit { t, normal })
+}
+
+pub fn intersect_cylinder_voxel(
+    ro: Vec3,
+    rd: Vec3,
+    map_pos: IVec3,
+    t_enter: f32,
+    t_exit: f32,
+) -> Option<ShapeHit> {
+    let c_xy = Vec2::new(map_pos.x as f32 + 0.5, map_pos.y as f32 + 0.5);
+    let ro_xy = Vec2::new(ro.x, ro.y);
+    let rd_xy = Vec2::new(rd.x, rd.y);
+    let oc = ro_xy - c_xy;
+    let z_min = map_pos.z as f32;
+    let z_max = z_min + 1.0;
+
+    let mut best: Option<ShapeHit> = None;
+
+    let a = rd_xy.length_squared();
+    if a > 1e-6 {
+        let b = oc.dot(rd_xy);
+        let c = oc.length_squared() - 0.25;
+        let disc = b * b - a * c;
+        if disc >= 0.0 {
+            let s = disc.sqrt();
+            for &t_cand in &[(-b - s) / a, (-b + s) / a] {
+                if t_cand >= t_enter - 1e-4 && t_cand <= t_exit + 1e-4 && t_cand > 0.0 {
+                    let z = ro.z + rd.z * t_cand;
+                    if z >= z_min - 1e-4 && z <= z_max + 1e-4 {
+                        let p = ro + rd * t_cand;
+                        let norm = Vec3::new(p.x - c_xy.x, p.y - c_xy.y, 0.0).normalize_or_zero();
+                        if best.as_ref().map_or(true, |b| t_cand < b.t) {
+                            best = Some(ShapeHit { t: t_cand, normal: norm });
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    if rd.z.abs() > 1e-6 {
+        let t_top = (z_max - ro.z) / rd.z;
+        if t_top >= t_enter - 1e-4 && t_top <= t_exit + 1e-4 && t_top > 0.0 {
+            let p_xy = ro_xy + rd_xy * t_top;
+            if (p_xy - c_xy).length_squared() <= 0.25 {
+                if best.as_ref().map_or(true, |b| t_top < b.t) {
+                    best = Some(ShapeHit { t: t_top, normal: Vec3::Z });
+                }
+            }
+        }
+        let t_bot = (z_min - ro.z) / rd.z;
+        if t_bot >= t_enter - 1e-4 && t_bot <= t_exit + 1e-4 && t_bot > 0.0 {
+            let p_xy = ro_xy + rd_xy * t_bot;
+            if (p_xy - c_xy).length_squared() <= 0.25 {
+                if best.as_ref().map_or(true, |b| t_bot < b.t) {
+                    best = Some(ShapeHit { t: t_bot, normal: -Vec3::Z });
+                }
+            }
+        }
+    }
+
+    best
+}
+
+pub fn intersect_clay_voxel(
+    ro: Vec3,
+    rd: Vec3,
+    map_pos: IVec3,
+    t_enter: f32,
+    t_exit: f32,
+) -> Option<ShapeHit> {
+    let center = map_pos.as_vec3() + Vec3::splat(0.5);
+    let b = Vec3::splat(0.38);
+    let r = 0.12;
+    let mut t = t_enter.max(0.0);
+    for _ in 0..6 {
+        let p = ro + rd * t;
+        let q = p - center;
+        let q_abs = q.abs();
+        let d_box = (q_abs - b).max(Vec3::ZERO);
+        let dist = d_box.length() - r;
+        if dist < 0.003 {
+            let normal = if d_box.length_squared() > 1e-5 {
+                (q.signum() * d_box).normalize_or_zero()
+            } else {
+                let mut flat = Vec3::ZERO;
+                if q_abs.x >= q_abs.y && q_abs.x >= q_abs.z {
+                    flat.x = q.x.signum();
+                } else if q_abs.y >= q_abs.z {
+                    flat.y = q.y.signum();
+                } else {
+                    flat.z = q.z.signum();
+                }
+                flat
+            };
+            return Some(ShapeHit { t, normal });
+        }
+        t += dist.max(0.005);
+        if t > t_exit + 1e-4 {
+            break;
+        }
+    }
+    None
+}
+
+pub fn intersect_lego_voxel(
+    ro: Vec3,
+    rd: Vec3,
+    map_pos: IVec3,
+    t_enter: f32,
+    _t_exit: f32,
+    has_stud: bool,
+    entry_normal: IVec3,
+) -> Option<ShapeHit> {
+    let z_max = map_pos.z as f32 + 1.0;
+    let c_xy = Vec2::new(map_pos.x as f32 + 0.5, map_pos.y as f32 + 0.5);
+    let r_stud = 0.28;
+    let mut best: Option<ShapeHit> = None;
+
+    if has_stud {
+        let ro_xy = Vec2::new(ro.x, ro.y);
+        let rd_xy = Vec2::new(rd.x, rd.y);
+        let oc = ro_xy - c_xy;
+        let a = rd_xy.length_squared();
+        if a > 1e-6 {
+            let b = oc.dot(rd_xy);
+            let c = oc.length_squared() - r_stud * r_stud;
+            let disc = b * b - a * c;
+            if disc >= 0.0 {
+                let s = disc.sqrt();
+                for &t_cand in &[(-b - s) / a, (-b + s) / a] {
+                    if t_cand > 0.0 {
+                        let z = ro.z + rd.z * t_cand;
+                        if z >= z_max && z <= z_max + 0.18 {
+                            let p = ro + rd * t_cand;
+                            let norm = Vec3::new(p.x - c_xy.x, p.y - c_xy.y, 0.0).normalize_or_zero();
+                            if best.as_ref().map_or(true, |b| t_cand < b.t) {
+                                best = Some(ShapeHit { t: t_cand, normal: norm });
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        if rd.z.abs() > 1e-6 {
+            let t_cap = (z_max + 0.18 - ro.z) / rd.z;
+            if t_cap > 0.0 {
+                let p_xy = ro_xy + rd_xy * t_cap;
+                if (p_xy - c_xy).length_squared() <= r_stud * r_stud {
+                    if best.as_ref().map_or(true, |b| t_cap < b.t) {
+                        best = Some(ShapeHit { t: t_cap, normal: Vec3::Z });
+                    }
+                }
+            }
+        }
+    }
+
+    let t_cube = t_enter.max(0.0);
+    let norm_cube = entry_normal.as_vec3();
+    if best.as_ref().map_or(true, |b| t_cube < b.t) {
+        best = Some(ShapeHit { t: t_cube, normal: norm_cube });
+    }
+
+    best
+}
+
+pub fn intersect_stud_in_cell(
+    ro: Vec3,
+    rd: Vec3,
+    map_pos: IVec3,
+    t_enter: f32,
+    t_exit: f32,
+) -> Option<ShapeHit> {
+    let z_base = map_pos.z as f32;
+    let c_xy = Vec2::new(map_pos.x as f32 + 0.5, map_pos.y as f32 + 0.5);
+    let r_stud = 0.28;
+    let ro_xy = Vec2::new(ro.x, ro.y);
+    let rd_xy = Vec2::new(rd.x, rd.y);
+    let oc = ro_xy - c_xy;
+    let mut best: Option<ShapeHit> = None;
+
+    let a = rd_xy.length_squared();
+    if a > 1e-6 {
+        let b = oc.dot(rd_xy);
+        let c = oc.length_squared() - r_stud * r_stud;
+        let disc = b * b - a * c;
+        if disc >= 0.0 {
+            let s = disc.sqrt();
+            for &t_cand in &[(-b - s) / a, (-b + s) / a] {
+                if t_cand >= t_enter - 1e-4 && t_cand <= t_exit + 1e-4 && t_cand > 0.0 {
+                    let z = ro.z + rd.z * t_cand;
+                    if z >= z_base && z <= z_base + 0.18 {
+                        let p = ro + rd * t_cand;
+                        let norm = Vec3::new(p.x - c_xy.x, p.y - c_xy.y, 0.0).normalize_or_zero();
+                        if best.as_ref().map_or(true, |b| t_cand < b.t) {
+                            best = Some(ShapeHit { t: t_cand, normal: norm });
+                        }
+                    }
+                }
+            }
+        }
+    }
+    if rd.z.abs() > 1e-6 {
+        let t_cap = (z_base + 0.18 - ro.z) / rd.z;
+        if t_cap >= t_enter - 1e-4 && t_cap <= t_exit + 1e-4 && t_cap > 0.0 {
+            let p_xy = ro_xy + rd_xy * t_cap;
+            if (p_xy - c_xy).length_squared() <= r_stud * r_stud {
+                if best.as_ref().map_or(true, |b| t_cap < b.t) {
+                    best = Some(ShapeHit { t: t_cap, normal: Vec3::Z });
+                }
+            }
+        }
+    }
+    best
 }
 
 /// Exact 3D DDA Ray-Picker against the VoxelGrid and optional `z = 0` ground plane
@@ -200,7 +490,18 @@ pub fn pick_voxel(
     ray_dir: Vec3,
     allow_ground: bool,
 ) -> Option<RayHit> {
-    if let Some(hit) = dda_raycast_grid(grid, ray_origin, ray_dir, 2048.0) {
+    pick_voxel_shaped(grid, ray_origin, ray_dir, allow_ground, VoxelShape::Cube)
+}
+
+/// Exact 3D DDA Ray-Picker with configurable voxel shape
+pub fn pick_voxel_shaped(
+    grid: &VoxelGrid,
+    ray_origin: Vec3,
+    ray_dir: Vec3,
+    allow_ground: bool,
+    shape: VoxelShape,
+) -> Option<RayHit> {
+    if let Some(hit) = dda_raycast_grid_shaped(grid, ray_origin, ray_dir, 2048.0, shape) {
         return Some(hit);
     }
     if allow_ground && ray_dir.z.abs() > 1e-5 {
@@ -217,6 +518,7 @@ pub fn pick_voxel(
                 return Some(RayHit {
                     voxel: IVec3::new(gx, gy, -1),
                     normal: IVec3::Z,
+                    normal_vec: Vec3::Z,
                     hit_pos: p,
                     t,
                     is_ground: true,
@@ -233,6 +535,17 @@ pub fn dda_raycast_grid(
     ray_origin: Vec3,
     ray_dir: Vec3,
     max_dist: f32,
+) -> Option<RayHit> {
+    dda_raycast_grid_shaped(grid, ray_origin, ray_dir, max_dist, VoxelShape::Cube)
+}
+
+/// Fast 3D DDA ray traversal with alternative voxel shapes
+pub fn dda_raycast_grid_shaped(
+    grid: &VoxelGrid,
+    ray_origin: Vec3,
+    ray_dir: Vec3,
+    max_dist: f32,
+    shape: VoxelShape,
 ) -> Option<RayHit> {
     let bmin = Vec3::ZERO;
     let bmax = Vec3::new(
@@ -287,15 +600,85 @@ pub fn dda_raycast_grid(
         if !grid.in_bounds(map_pos.x, map_pos.y, map_pos.z) || t_cur > max_dist {
             break;
         }
+        let t_next = t_max.x.min(t_max.y.min(t_max.z));
         let c = grid.get(map_pos.x as u32, map_pos.y as u32, map_pos.z as u32);
         if c != 0 {
-            return Some(RayHit {
-                voxel: map_pos,
-                normal,
-                hit_pos: ray_origin + ray_dir * t_cur,
-                t: t_cur,
-                is_ground: false,
-            });
+            match shape {
+                VoxelShape::Cube => {
+                    return Some(RayHit {
+                        voxel: map_pos,
+                        normal,
+                        normal_vec: normal.as_vec3(),
+                        hit_pos: ray_origin + ray_dir * t_cur,
+                        t: t_cur,
+                        is_ground: false,
+                    });
+                }
+                VoxelShape::Sphere => {
+                    if let Some(sh) = intersect_sphere_voxel(ray_origin, ray_dir, map_pos, t_cur, t_next) {
+                        return Some(RayHit {
+                            voxel: map_pos,
+                            normal: sh.discrete_normal(normal),
+                            normal_vec: sh.normal,
+                            hit_pos: ray_origin + ray_dir * sh.t,
+                            t: sh.t,
+                            is_ground: false,
+                        });
+                    }
+                }
+                VoxelShape::Cylinder => {
+                    if let Some(ch) = intersect_cylinder_voxel(ray_origin, ray_dir, map_pos, t_cur, t_next) {
+                        return Some(RayHit {
+                            voxel: map_pos,
+                            normal: ch.discrete_normal(normal),
+                            normal_vec: ch.normal,
+                            hit_pos: ray_origin + ray_dir * ch.t,
+                            t: ch.t,
+                            is_ground: false,
+                        });
+                    }
+                }
+                VoxelShape::Lego => {
+                    let has_stud = grid.get_i32(map_pos.x, map_pos.y, map_pos.z + 1) == 0;
+                    if let Some(lh) = intersect_lego_voxel(ray_origin, ray_dir, map_pos, t_cur, t_next, has_stud, normal) {
+                        return Some(RayHit {
+                            voxel: map_pos,
+                            normal: lh.discrete_normal(normal),
+                            normal_vec: lh.normal,
+                            hit_pos: ray_origin + ray_dir * lh.t,
+                            t: lh.t,
+                            is_ground: false,
+                        });
+                    }
+                }
+                VoxelShape::Clay => {
+                    if let Some(ch) = intersect_clay_voxel(ray_origin, ray_dir, map_pos, t_cur, t_next) {
+                        return Some(RayHit {
+                            voxel: map_pos,
+                            normal: ch.discrete_normal(normal),
+                            normal_vec: ch.normal,
+                            hit_pos: ray_origin + ray_dir * ch.t,
+                            t: ch.t,
+                            is_ground: false,
+                        });
+                    }
+                }
+            }
+        } else if shape == VoxelShape::Lego
+            && map_pos.z > 0
+            && grid.get_i32(map_pos.x, map_pos.y, map_pos.z - 1) != 0
+        {
+            if let Some(sh) = intersect_stud_in_cell(ray_origin, ray_dir, map_pos, t_cur, t_next) {
+                let below_voxel = map_pos - IVec3::Z;
+                return Some(RayHit {
+                    voxel: below_voxel,
+                    normal: sh.discrete_normal(IVec3::Z),
+                    normal_vec: sh.normal,
+                    hit_pos: ray_origin + ray_dir * sh.t,
+                    t: sh.t,
+                    is_ground: false,
+                });
+            }
         }
 
         if t_max.x < t_max.y {
@@ -402,7 +785,7 @@ fn shade_ray(
         None
     };
 
-    let voxel_hit = dda_raycast_grid(grid, ray_o, ray_d, 1500.0);
+    let voxel_hit = dda_raycast_grid_shaped(grid, ray_o, ray_d, 1500.0, display.voxel_shape);
 
     // Ground plane intersection at z = 0
     let ground_t = if (display.show_ground || display.show_grid) && ray_d.z.abs() > 1e-5 {
@@ -434,13 +817,13 @@ fn shade_ray(
         let is_preview = preview_voxels.contains(&hit.voxel)
             || preview_voxels.contains(&(hit.voxel + hit.normal));
 
-        let n_vec = Vec3::new(hit.normal.x as f32, hit.normal.y as f32, hit.normal.z as f32);
+        let n_vec = hit.normal_vec;
         let ndotl = n_vec.dot(sun_dir).max(0.0);
 
         // Shadow ray
         let shadow = if display.show_shadows && ndotl > 0.0 {
             let shadow_o = hit.hit_pos + n_vec * 0.02;
-            if dda_raycast_grid(grid, shadow_o, sun_dir, 256.0).is_some() {
+            if dda_raycast_grid_shaped(grid, shadow_o, sun_dir, 256.0, display.voxel_shape).is_some() {
                 0.42
             } else {
                 1.0
@@ -482,6 +865,31 @@ fn shade_ray(
 
         base_col = base_col * (diffuse * emit_boost) + Vec3::splat(spec);
 
+        // Dynamic Point Lights evaluation
+        for light in &project.lights {
+            let to_light = light.position - hit.hit_pos;
+            let dist = to_light.length();
+            if dist < light.radius && dist > 1e-4 {
+                let l_dir = to_light / dist;
+                let l_ndotl = n_vec.dot(l_dir).max(0.0);
+                if l_ndotl > 0.0 {
+                    let shadow_o = hit.hit_pos + n_vec * 0.02;
+                    let occluded = display.show_shadows
+                        && dda_raycast_grid_shaped(grid, shadow_o, l_dir, dist - 0.05, display.voxel_shape).is_some();
+                    if !occluded {
+                        let atten = light.intensity / (1.0 + dist * dist);
+                        let cutoff = (1.0 - dist / light.radius).clamp(0.0, 1.0);
+                        let smooth_cutoff = cutoff * cutoff * (3.0 - 2.0 * cutoff);
+                        let l_col = Vec3::from_array(light.color);
+                        let factor = atten * smooth_cutoff * l_ndotl;
+                        let l_half = (l_dir + view_dir).normalize_or_zero();
+                        let l_spec = n_vec.dot(l_half).max(0.0).powf(spec_power) * spec_strength * (atten * smooth_cutoff);
+                        base_col += (base_col * l_col) * factor + l_col * l_spec;
+                    }
+                }
+            }
+        }
+
         // Voxel edges (`CTRL+E`) or wireframe (`CTRL+M`)
         if display.show_edges || display.show_wireframe {
             let edge_dist = voxel_face_edge_distance(hit.hit_pos, hit.normal);
@@ -519,8 +927,29 @@ fn shade_ray(
 
             // Ground shadow from volume
             if display.show_shadows {
-                if dda_raycast_grid(grid, gp + Vec3::Z * 0.02, sun_dir, 256.0).is_some() {
+                if dda_raycast_grid_shaped(grid, gp + Vec3::Z * 0.02, sun_dir, 256.0, display.voxel_shape).is_some() {
                     gcol *= 0.62;
+                }
+            }
+
+            // Ground illumination from dynamic point lights
+            for light in &project.lights {
+                let to_light = light.position - gp;
+                let dist = to_light.length();
+                if dist < light.radius && dist > 1e-4 {
+                    let l_dir = to_light / dist;
+                    let l_ndotl = l_dir.z.max(0.0);
+                    if l_ndotl > 0.0 {
+                        let occluded = display.show_shadows
+                            && dda_raycast_grid_shaped(grid, gp + Vec3::Z * 0.02, l_dir, dist - 0.05, display.voxel_shape).is_some();
+                        if !occluded {
+                            let atten = light.intensity / (1.0 + dist * dist);
+                            let cutoff = (1.0 - dist / light.radius).clamp(0.0, 1.0);
+                            let smooth_cutoff = cutoff * cutoff * (3.0 - 2.0 * cutoff);
+                            let l_col = Vec3::from_array(light.color);
+                            gcol += gcol * l_col * (atten * smooth_cutoff * l_ndotl);
+                        }
+                    }
                 }
             }
 
@@ -730,6 +1159,197 @@ mod tests {
         engine.render_progressive(&project, &camera, &display, &pt_settings, 32, 32, &mut rgba);
         assert_eq!(rgba.len(), 32 * 32 * 4);
         assert!(engine.current_samples >= 1);
+    }
+
+    #[test]
+    fn test_voxel_shapes_raycast() {
+        let mut grid = VoxelGrid::new(10, 10, 10);
+        grid.set(5, 5, 5, 3);
+
+        // 1. Sphere: center hit hits the top of the sphere (z = 6.0) with normal +Z
+        let center_origin = Vec3::new(5.5, 5.5, 10.0);
+        let down_dir = Vec3::new(0.0, 0.0, -1.0);
+        let hit_sphere = dda_raycast_grid_shaped(&grid, center_origin, down_dir, 100.0, VoxelShape::Sphere)
+            .expect("Should hit sphere at center");
+        assert_eq!(hit_sphere.voxel, IVec3::new(5, 5, 5));
+        assert!((hit_sphere.hit_pos.z - 6.0).abs() < 1e-3);
+        assert!((hit_sphere.normal_vec - Vec3::Z).length() < 1e-3);
+
+        // Corner of the voxel cell (5.05, 5.05): misses the inscribed sphere!
+        let corner_origin = Vec3::new(5.05, 5.05, 10.0);
+        let hit_corner = dda_raycast_grid_shaped(&grid, corner_origin, down_dir, 100.0, VoxelShape::Sphere);
+        assert!(hit_corner.is_none(), "Ray through corner of cell must miss the sphere");
+
+        // 2. Cylinder: center hit hits the top cap with normal +Z
+        let hit_cyl = dda_raycast_grid_shaped(&grid, center_origin, down_dir, 100.0, VoxelShape::Cylinder)
+            .expect("Should hit cylinder top cap");
+        assert_eq!(hit_cyl.voxel, IVec3::new(5, 5, 5));
+        assert!((hit_cyl.hit_pos.z - 6.0).abs() < 1e-3);
+
+        // Cylinder side hit: ray from +X towards cylinder
+        let side_origin = Vec3::new(10.0, 5.5, 5.5);
+        let left_dir = Vec3::new(-1.0, 0.0, 0.0);
+        let hit_cyl_side = dda_raycast_grid_shaped(&grid, side_origin, left_dir, 100.0, VoxelShape::Cylinder)
+            .expect("Should hit cylinder side");
+        assert!((hit_cyl_side.hit_pos.x - 6.0).abs() < 1e-3);
+        assert!((hit_cyl_side.normal_vec - Vec3::X).length() < 1e-3);
+
+        // 3. Lego: top face has stud extending to z = 6.18
+        let hit_lego = dda_raycast_grid_shaped(&grid, center_origin, down_dir, 100.0, VoxelShape::Lego)
+            .expect("Should hit Lego stud");
+        assert_eq!(hit_lego.voxel, IVec3::new(5, 5, 5));
+        assert!((hit_lego.hit_pos.z - 6.18).abs() < 1e-2);
+
+        // 4. Clay: center hit has normal +Z
+        let hit_clay = dda_raycast_grid_shaped(&grid, center_origin, down_dir, 100.0, VoxelShape::Clay)
+            .expect("Should hit clay");
+        assert_eq!(hit_clay.voxel, IVec3::new(5, 5, 5));
+        assert!((hit_clay.normal_vec - Vec3::Z).length() < 1e-2);
+    }
+
+    #[test]
+    fn test_point_light_illumination_and_shadow_occlusion() {
+        let mut project = EditorProject::new_empty(16, 16, 16);
+        // Place one target voxel at (8, 8, 0)
+        project.grid.set(8, 8, 0, 1);
+        project.palette.colors[1] = Rgba::new(200, 200, 200, 255);
+
+        let mut camera = OrbitCamera::default();
+        camera.target = Vec3::new(8.5, 8.5, 1.0);
+        camera.distance = 10.0;
+        camera.yaw_deg = -90.0;
+        camera.pitch_deg = 45.0;
+
+        let display = DisplaySettings {
+            show_ground: false,
+            show_background: false,
+            show_shadows: true,
+            ..Default::default()
+        };
+
+        // Render without point lights
+        let preview = HashSet::new();
+        let mut rgba_unlit = Vec::new();
+        render_viewport_rgba(&project, &camera, &display, &preview, 16, 16, &mut rgba_unlit);
+
+        // Add a bright point light directly above the voxel
+        let light = PointLight::new(Vec3::new(8.5, 8.5, 6.0), 10.0, [1.0, 0.8, 0.5], 25.0);
+        project.lights.push(light);
+
+        let mut rgba_lit = Vec::new();
+        render_viewport_rgba(&project, &camera, &display, &preview, 16, 16, &mut rgba_lit);
+
+        let center_idx = (8 * 16 + 8) * 4;
+        let lum_unlit = rgba_unlit[center_idx] as u32 + rgba_unlit[center_idx + 1] as u32;
+        let lum_lit = rgba_lit[center_idx] as u32 + rgba_lit[center_idx + 1] as u32;
+        assert!(
+            lum_lit > lum_unlit,
+            "Point light must illuminate the voxel: lit {lum_lit} vs unlit {lum_unlit}"
+        );
+
+        // Place an occluding voxel strictly between the light and the target voxel (e.g. z = 3)
+        project.grid.set(8, 8, 3, 1);
+        let mut rgba_occluded = Vec::new();
+        render_viewport_rgba(&project, &camera, &display, &preview, 16, 16, &mut rgba_occluded);
+        let lum_occ = rgba_occluded[center_idx] as u32 + rgba_occluded[center_idx + 1] as u32;
+        assert!(
+            lum_occ < lum_lit,
+            "Occluding voxel must cast shadow from point light: occ {lum_occ} vs lit {lum_lit}"
+        );
+    }
+
+    #[test]
+    fn test_atmosphere_presets_and_application() {
+        let mut pt = PathTracerSettings::default();
+        let mut disp = DisplaySettings::default();
+
+        pt.apply_preset(AtmospherePreset::GoldenHour);
+        disp.apply_preset(AtmospherePreset::GoldenHour);
+        assert!((pt.sun_intensity - 2.2).abs() < 1e-4);
+        assert!((pt.bloom - 0.35).abs() < 1e-4);
+        assert_eq!(pt.sky_color, [0.95, 0.62, 0.32]);
+        assert_eq!(disp.sun_elevation_deg, 12.0);
+
+        pt.apply_preset(AtmospherePreset::MidnightFairytale);
+        disp.apply_preset(AtmospherePreset::MidnightFairytale);
+        assert!((pt.sun_intensity - 0.15).abs() < 1e-4);
+        assert!((pt.bloom - 0.60).abs() < 1e-4);
+        assert_eq!(pt.sky_color, [0.03, 0.05, 0.16]);
+        assert_eq!(disp.sun_elevation_deg, 45.0);
+
+        pt.apply_preset(AtmospherePreset::MistyMorning);
+        disp.apply_preset(AtmospherePreset::MistyMorning);
+        assert!((pt.sun_intensity - 0.75).abs() < 1e-4);
+        assert!((pt.fog_density - 0.025).abs() < 1e-4);
+
+        pt.apply_preset(AtmospherePreset::Default);
+        disp.apply_preset(AtmospherePreset::Default);
+        assert!((pt.sun_intensity - 1.4).abs() < 1e-4);
+        assert!((pt.bloom - 0.0).abs() < 1e-4);
+    }
+
+    #[test]
+    fn test_hdr_bloom_filter_postprocess() {
+        let mut project = EditorProject::new_empty(8, 8, 8);
+        // Bright emissive core voxel at center
+        project.grid.set(4, 4, 4, 1);
+        project.materials[1].kind = MaterialType::Emit;
+        project.materials[1].emit = 5.0;
+
+        let mut camera = OrbitCamera::default();
+        camera.target = Vec3::new(4.5, 4.5, 4.5);
+        camera.distance = 12.0;
+
+        let display = DisplaySettings {
+            show_ground: false,
+            show_background: false,
+            ..Default::default()
+        };
+
+        let mut engine_no_bloom = PathTracerEngine::new();
+        let pt_no_bloom = PathTracerSettings {
+            bloom: 0.0,
+            target_samples: 2,
+            samples_per_frame: 2,
+            ..Default::default()
+        };
+        let mut rgba_no_bloom = Vec::new();
+        engine_no_bloom.render_progressive(
+            &project,
+            &camera,
+            &display,
+            &pt_no_bloom,
+            32,
+            32,
+            &mut rgba_no_bloom,
+        );
+
+        let mut engine_bloom = PathTracerEngine::new();
+        let pt_bloom = PathTracerSettings {
+            bloom: 1.0,
+            target_samples: 2,
+            samples_per_frame: 2,
+            ..Default::default()
+        };
+        let mut rgba_bloom = Vec::new();
+        engine_bloom.render_progressive(
+            &project,
+            &camera,
+            &display,
+            &pt_bloom,
+            32,
+            32,
+            &mut rgba_bloom,
+        );
+
+        // Check halo around the emissive object (e.g. at offset (px=8, py=8), which is outside the object)
+        let halo_idx = (8 * 32 + 8) * 4;
+        let halo_no_bloom = rgba_no_bloom[halo_idx] as u32 + rgba_no_bloom[halo_idx + 1] as u32;
+        let halo_bloom = rgba_bloom[halo_idx] as u32 + rgba_bloom[halo_idx + 1] as u32;
+        assert!(
+            halo_bloom >= halo_no_bloom,
+            "Bloom must spread glow into surrounding pixels: bloom {halo_bloom} vs no_bloom {halo_no_bloom}"
+        );
     }
 }
 

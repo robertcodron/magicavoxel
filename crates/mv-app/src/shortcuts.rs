@@ -24,6 +24,31 @@ impl MagicaVoxelApp {
             return;
         }
 
+        // Custom hotkey bindings from config/hotkey.txt
+        let mut triggered_hotkeys = Vec::new();
+        ctx.input(|i| {
+            if i.key_pressed(Key::Escape) && self.radial_menu.is_open {
+                self.radial_menu.close();
+            }
+            if i.key_pressed(Key::Space) {
+                if self.radial_menu.is_open {
+                    self.radial_menu.close();
+                } else if self.mode == ViewportMode::ModelEditor {
+                    let center = self.viewport_rect.center();
+                    self.radial_menu.open(center, i.time);
+                }
+            }
+            for (binding, action) in &self.hotkeys.bindings {
+                if binding.matches(i) {
+                    triggered_hotkeys.push(action.clone());
+                }
+            }
+        });
+
+        for act in triggered_hotkeys {
+            self.dispatch_hotkey_action(&act);
+        }
+
         ctx.input(|i| {
             let cmd = i.modifiers.command || i.modifiers.ctrl;
             let shift = i.modifiers.shift;
@@ -210,4 +235,199 @@ impl MagicaVoxelApp {
             self.handle_world_shortcuts(ctx);
         }
     }
+
+    pub(crate) fn dispatch_hotkey_action(&mut self, action: &str) {
+        let act = action.trim();
+        match act.to_ascii_lowercase().as_str() {
+            "radial_menu" | "radial" | "pie_menu" => {
+                let center = self.viewport_rect.center();
+                self.radial_menu.open(center, 0.0);
+            }
+            "undo" => {
+                if self.mode == ViewportMode::WorldEditor {
+                    self.world_undo_redo(false);
+                } else if self.project.undo() {
+                    self.sync_size_input();
+                }
+            }
+            "redo" => {
+                if self.mode == ViewportMode::WorldEditor {
+                    self.world_undo_redo(true);
+                } else if self.project.redo() {
+                    self.sync_size_input();
+                }
+            }
+            "switch_mode" | "switch_editor" => {
+                self.mode = match self.mode {
+                    ViewportMode::ModelEditor => ViewportMode::WorldEditor,
+                    ViewportMode::WorldEditor => ViewportMode::ModelEditor,
+                    ViewportMode::PathTracer => ViewportMode::ModelEditor,
+                };
+            }
+            cmd => {
+                self.execute_command_str(cmd);
+            }
+        }
+    }
+}
+
+/// A custom keyboard shortcut binding.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct KeyBinding {
+    pub key: Key,
+    pub ctrl: bool,
+    pub shift: bool,
+    pub alt: bool,
+}
+
+impl KeyBinding {
+    pub fn matches(&self, input: &egui::InputState) -> bool {
+        let cmd = input.modifiers.command || input.modifiers.ctrl;
+        let shift = input.modifiers.shift;
+        let alt = input.modifiers.alt;
+
+        cmd == self.ctrl && shift == self.shift && alt == self.alt && input.key_pressed(self.key)
+    }
+}
+
+/// Customizable keyboard shortcuts configuration loaded from `config/hotkey.txt`.
+#[derive(Debug, Clone, Default)]
+pub struct HotkeyConfig {
+    pub bindings: Vec<(KeyBinding, String)>,
+}
+
+impl HotkeyConfig {
+    #[allow(dead_code)]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Load configuration from `config/hotkey.txt` if it exists.
+    pub fn load_default_or_file() -> Self {
+        let path = std::path::Path::new("config/hotkey.txt");
+        if path.exists() {
+            if let Ok(content) = std::fs::read_to_string(path) {
+                return Self::parse_str(&content);
+            }
+        }
+        Self::default()
+    }
+
+    /// Parse configuration content into key bindings.
+    pub fn parse_str(content: &str) -> Self {
+        let mut bindings = Vec::new();
+        for line in content.lines() {
+            let line = line.trim();
+            if line.is_empty() || line.starts_with('#') || line.starts_with("//") {
+                continue;
+            }
+
+            let (key_part, act_part) = if let Some((k, a)) = line.split_once(':') {
+                (k.trim(), a.trim())
+            } else if let Some((k, a)) = line.split_once('=') {
+                (k.trim(), a.trim())
+            } else {
+                continue;
+            };
+
+            let key_clean = key_part.trim_matches('\'').trim_matches('"').trim();
+            let act_clean = act_part.trim_matches('\'').trim_matches('"').trim();
+
+            if let Some(binding) = parse_key_combo(key_clean) {
+                bindings.push((binding, act_clean.to_string()));
+            }
+        }
+        Self { bindings }
+    }
+}
+
+/// Parse a string representing a key combo like `CTRL+Z`, `SHIFT+F2`, `ALT+R`, `SPACE`, etc.
+pub fn parse_key_combo(spec: &str) -> Option<KeyBinding> {
+    let mut ctrl = false;
+    let mut shift = false;
+    let mut alt = false;
+    let mut parsed_key = None;
+
+    let parts: Vec<&str> = spec
+        .split(|c| c == '+' || c == '-')
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .collect();
+
+    for part in parts {
+        let upper = part.to_ascii_uppercase();
+        match upper.as_str() {
+            "CTRL" | "CMD" | "COMMAND" | "CONTROL" => ctrl = true,
+            "SHIFT" => shift = true,
+            "ALT" | "OPT" | "OPTION" => alt = true,
+            "A" => parsed_key = Some(Key::A),
+            "B" => parsed_key = Some(Key::B),
+            "C" => parsed_key = Some(Key::C),
+            "D" => parsed_key = Some(Key::D),
+            "E" => parsed_key = Some(Key::E),
+            "F" => parsed_key = Some(Key::F),
+            "G" => parsed_key = Some(Key::G),
+            "H" => parsed_key = Some(Key::H),
+            "I" => parsed_key = Some(Key::I),
+            "J" => parsed_key = Some(Key::J),
+            "K" => parsed_key = Some(Key::K),
+            "L" => parsed_key = Some(Key::L),
+            "M" => parsed_key = Some(Key::M),
+            "N" => parsed_key = Some(Key::N),
+            "O" => parsed_key = Some(Key::O),
+            "P" => parsed_key = Some(Key::P),
+            "Q" => parsed_key = Some(Key::Q),
+            "R" => parsed_key = Some(Key::R),
+            "S" => parsed_key = Some(Key::S),
+            "T" => parsed_key = Some(Key::T),
+            "U" => parsed_key = Some(Key::U),
+            "V" => parsed_key = Some(Key::V),
+            "W" => parsed_key = Some(Key::W),
+            "X" => parsed_key = Some(Key::X),
+            "Y" => parsed_key = Some(Key::Y),
+            "Z" => parsed_key = Some(Key::Z),
+            "0" | "NUM0" => parsed_key = Some(Key::Num0),
+            "1" | "NUM1" => parsed_key = Some(Key::Num1),
+            "2" | "NUM2" => parsed_key = Some(Key::Num2),
+            "3" | "NUM3" => parsed_key = Some(Key::Num3),
+            "4" | "NUM4" => parsed_key = Some(Key::Num4),
+            "5" | "NUM5" => parsed_key = Some(Key::Num5),
+            "6" | "NUM6" => parsed_key = Some(Key::Num6),
+            "7" | "NUM7" => parsed_key = Some(Key::Num7),
+            "8" | "NUM8" => parsed_key = Some(Key::Num8),
+            "9" | "NUM9" => parsed_key = Some(Key::Num9),
+            "F1" => parsed_key = Some(Key::F1),
+            "F2" => parsed_key = Some(Key::F2),
+            "F3" => parsed_key = Some(Key::F3),
+            "F4" => parsed_key = Some(Key::F4),
+            "F5" => parsed_key = Some(Key::F5),
+            "F6" => parsed_key = Some(Key::F6),
+            "F7" => parsed_key = Some(Key::F7),
+            "F8" => parsed_key = Some(Key::F8),
+            "F9" => parsed_key = Some(Key::F9),
+            "F10" => parsed_key = Some(Key::F10),
+            "F11" => parsed_key = Some(Key::F11),
+            "F12" => parsed_key = Some(Key::F12),
+            "SPACE" => parsed_key = Some(Key::Space),
+            "TAB" => parsed_key = Some(Key::Tab),
+            "ENTER" | "RETURN" => parsed_key = Some(Key::Enter),
+            "ESCAPE" | "ESC" => parsed_key = Some(Key::Escape),
+            "BACKSPACE" => parsed_key = Some(Key::Backspace),
+            "DELETE" | "DEL" => parsed_key = Some(Key::Delete),
+            "PLUS" | "=" => parsed_key = Some(Key::Plus),
+            "MINUS" => parsed_key = Some(Key::Minus),
+            "LEFT" => parsed_key = Some(Key::ArrowLeft),
+            "RIGHT" => parsed_key = Some(Key::ArrowRight),
+            "UP" => parsed_key = Some(Key::ArrowUp),
+            "DOWN" => parsed_key = Some(Key::ArrowDown),
+            _ => {}
+        }
+    }
+
+    parsed_key.map(|key| KeyBinding {
+        key,
+        ctrl,
+        shift,
+        alt,
+    })
 }

@@ -5,6 +5,7 @@ use glam::IVec3;
 use crate::brush::BrushSettings;
 use crate::command::{execute_console_command, CommandOutcome};
 use crate::history::History;
+use crate::light::PointLight;
 use crate::material::Material;
 use crate::palette::Palette;
 use crate::scene::{NodeId, Scene, SceneError, SceneStructure, Transform};
@@ -39,6 +40,7 @@ pub struct EditorProject {
     pub history: History,
     pub console_history: Vec<String>,
     pub console_logs: Vec<String>,
+    pub lights: Vec<PointLight>,
     pub dirty: bool,
     /// Number of recorded modifications (voxel or World undo steps) since creation or
     /// load. Drives the auto-backup.
@@ -87,6 +89,7 @@ impl Default for EditorProject {
                 "MagicaVoxel Rust Edition ready. Press F1 to focus the console, type 'help' for commands. TAB switches Model / World editors."
                     .to_string(),
             ],
+            lights: Vec::new(),
             dirty: false,
             edit_count: 0,
         }
@@ -403,6 +406,31 @@ impl EditorProject {
             }
         }
         count
+    }
+
+    /// Adds a point light to the project scene. Returns the index of the new light.
+    pub fn add_light(&mut self, light: PointLight) -> usize {
+        self.lights.push(light);
+        self.dirty = true;
+        self.lights.len() - 1
+    }
+
+    /// Removes a point light at the specified index, if it exists.
+    pub fn remove_light(&mut self, index: usize) -> Option<PointLight> {
+        if index < self.lights.len() {
+            self.dirty = true;
+            Some(self.lights.remove(index))
+        } else {
+            None
+        }
+    }
+
+    /// Clears all point lights from the project.
+    pub fn clear_lights(&mut self) {
+        if !self.lights.is_empty() {
+            self.dirty = true;
+            self.lights.clear();
+        }
     }
 
     pub fn run_command(&mut self, cmd_line: &str) -> Result<CommandOutcome, String> {
